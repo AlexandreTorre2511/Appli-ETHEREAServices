@@ -38,7 +38,12 @@ const ST_CONTRAT = { actif: ["Actif", "ok"], suspendu: ["Suspendu", "warn"], res
 const SERVICES = ["Dératisation et désouratisation", "Désinsectisation blattes", "Désinsectisation fourmis", "Désinsectisation punaises de lit",
   "Désinsectisation insectes volants", "Démoustication", "Désinfection", "Dispositifs anti-oiseaux", "Débarras bureaux et archives",
   "Débarras logement", "Assainissement", "Nettoyage parties communes", "Nettoyage fin de chantier", "Nettoyage de hotte"];
-const TABLES = ["clients", "contrats", "factures", "interventions", "devis", "techniciens", "membres", "parametres"];
+const TABLES = ["clients", "contrats", "factures", "interventions", "devis", "techniciens", "membres", "parametres", "taches", "acces"];
+const KEY = { acces: "email" };
+const keyOf = t => KEY[t] || "id";
+const ST_TACHE = { a_faire: ["À faire", "info"], en_cours: ["En cours", "warn"], fait: ["Fait", "ok"] };
+const PRIO = { haute: ["Haute", "danger"], normale: ["Normale", "mute"], basse: ["Basse", "mute"] };
+const ROLES = { direction: "Direction", admin: "Administration (Manon)", collaborateur: "Collaborateur" };
 const DEFAULT_PARAMS = { urssaf: 0.26, cible_marque: 0.5, delai_paiement: 30, objectif_residences: 3, objectif_debut: "2026-10-30", objectif_fin: "2026-12-31", objectif_ca_mensuel: 0 };
 
 /* ---------- Mouvement ---------- */
@@ -52,26 +57,51 @@ const cfg = window.ETHEREA_CONFIG || {};
 const REMOTE = !!(cfg.supabaseUrl && cfg.supabaseAnonKey && window.supabase);
 const LS_KEY = "etherea-board-v1";
 let sb = null, user = null;
+let ROLE = REMOTE ? null : "direction";   // direction | admin | collaborateur
+let MON_NOM = "";
+const AUTH_TYPE = (/[#&]type=(invite|recovery|magiclink|signup)/.exec(location.hash) || [])[1] || "";
 
 const params = () => ({ ...DEFAULT_PARAMS, ...((S.parametres.find(p => p.id === "main") || {}).data || {}) });
 const client = id => S.clients.find(c => c.id === id) || { nom: "Client inconnu" };
 const contrat = id => S.contrats.find(c => c.id === id);
-const me = () => (user?.email ? S.membres.find(m => m.email && m.email.toLowerCase() === user.email.toLowerCase()) : null);
+const me = () => {
+  const a = user?.email ? S.acces.find(x => x.email && x.email.toLowerCase() === user.email.toLowerCase()) : null;
+  const m = user?.email ? S.membres.find(x => x.email && x.email.toLowerCase() === user.email.toLowerCase()) : null;
+  return a || m ? { nom: (m && m.nom) || (a && a.nom) || "" } : (REMOTE ? null : { nom: "" });
+};
+const isGestion = () => ROLE === "direction" || ROLE === "admin";
+const estAssigne = (liste, nom) => !!nom && String(liste || "").split("/").some(x => x.trim().toLowerCase() === nom.trim().toLowerCase());
 
 const store = {
   async load() {
     if (REMOTE) {
-      const res = await Promise.all(TABLES.map(t => sb.from(t).select("*")));
-      res.forEach((r, i) => { if (r.error) throw r.error; S[TABLES[i]] = r.data || []; });
+      const a = await sb.from("acces").select("*");
+      if (a.error) throw a.error;
+      S.acces = a.data || [];
+      const moi = S.acces.find(x => x.email.toLowerCase() === (user?.email || "").toLowerCase());
+      ROLE = moi ? moi.role : null; MON_NOM = moi ? moi.nom : "";
+      if (!ROLE) return;
+      if (ROLE === "collaborateur") {
+        const [t, i] = await Promise.all([sb.from("taches").select("*"), sb.rpc("mes_interventions")]);
+        if (t.error) throw t.error; if (i.error) throw i.error;
+        S.taches = t.data || []; S.interventions = i.data || [];
+        return;
+      }
+      const list = TABLES.filter(t => t !== "acces");
+      const res = await Promise.all(list.map(t => sb.from(t).select("*")));
+      res.forEach((r, i) => { if (r.error) throw r.error; S[list[i]] = r.data || []; });
     } else {
       try { const d = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); TABLES.forEach(t => S[t] = d[t] || []); } catch (e) { /* stockage indisponible */ }
+      ROLE = localStorage.getItem("etherea-role-demo") || "direction";
+      MON_NOM = ROLE === "admin" ? "Manon" : ROLE === "collaborateur" ? (localStorage.getItem("etherea-nom-demo") || "Théo") : "";
+      if (ROLE === "collaborateur") S.interventions = S.interventions.filter(i => estAssigne(i.technicien, MON_NOM) && i.statut !== "annulee").map(i => ({ ...i, client_nom: client(i.client_id).nom, client_adresse: client(i.client_id).adresse, client_contact: client(i.client_id).contact, client_tel: client(i.client_id).tel }));
     }
   },
   saveLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) { toast("Enregistrement local impossible sur ce navigateur"); } },
   async upsert(table, row) {
     const clean = {};
     Object.keys(row).forEach(k => { if (!k.startsWith("_")) clean[k] = row[k] === "" ? null : row[k]; });
-    if (!clean.id) clean.id = uuid();
+    if (keyOf(table) === "id" && !clean.id) clean.id = uuid();
     clean.updated_at = new Date().toISOString();
     if (REMOTE) {
       const { data, error } = await sb.from(table).upsert(clean).select().single();
@@ -82,13 +112,15 @@ const store = {
     apply(table, clean); store.saveLocal(); return clean;
   },
   async remove(table, id) {
-    if (REMOTE) { const { error } = await sb.from(table).delete().eq("id", id); if (error) { toast("Erreur : " + error.message); throw error; } }
-    S[table] = S[table].filter(r => r.id !== id);
+    const k = keyOf(table);
+    if (REMOTE) { const { error } = await sb.from(table).delete().eq(k, id); if (error) { toast("Erreur : " + error.message); throw error; } }
+    S[table] = S[table].filter(r => r[k] !== id);
     if (!REMOTE) store.saveLocal();
   }
 };
 function apply(table, row) {
-  const i = S[table].findIndex(r => r.id === row.id);
+  const k = keyOf(table);
+  const i = S[table].findIndex(r => r[k] === row[k]);
   if (i >= 0) S[table][i] = { ...S[table][i], ...row }; else S[table].push(row);
 }
 
@@ -157,6 +189,8 @@ function alerts() {
   const sansPlan = S.contrats.filter(c => c.statut === "actif" && c.frequence !== "Ponctuel" && !contratStats(c).prochain);
   if (sansPlan.length) list.push({ lvl: "info", txt: `${sansPlan.length} contrat${sansPlan.length > 1 ? "s" : ""} sans prochain passage planifié`, go: "clients:contrats" });
   const ech = S.contrats.filter(c => { const d = contratDates(c); return c.statut === "actif" && d.denonciation && d.denonciation >= t && d.denonciation <= addDays(t, 45); });
+  const tLate = S.taches.filter(x => x.statut !== "fait" && x.echeance && x.echeance < t);
+  if (tLate.length) list.push({ lvl: "warn", txt: `${tLate.length} tâche${tLate.length > 1 ? "s" : ""} d'équipe en retard`, go: "collab" });
   if (ech.length) list.push({ lvl: "info", txt: `${ech.length} contrat${ech.length > 1 ? "s" : ""} proche${ech.length > 1 ? "s" : ""} de la date limite de dénonciation`, go: "clients:contrats" });
   return list;
 }
@@ -174,40 +208,62 @@ const I = {
   left: '<path d="m15 18-6-6 6-6"/>', right: '<path d="m9 18 6-6-6-6"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
   check: '<path d="M5 12.5 10 17 19 7"/>',
+  inbox: '<path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M5.5 5h13L21 13v6H3v-6z"/>',
+  team2: '<circle cx="8" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M2.5 20a5.5 5.5 0 0 1 11 0M14 20a4 4 0 0 1 7.5-1.8"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  pin: '<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  phone: '<path d="M6.6 3.5 9 4l1.4 4-2 1.4a12 12 0 0 0 6.2 6.2l1.4-2 4 1.4.5 2.4a2 2 0 0 1-2 2.3A17 17 0 0 1 4.3 5.5a2 2 0 0 1 2.3-2z"/>',
 };
 const icon = n => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
 const pill = (map, k, extra = "") => { const [l, c] = map[k] || [k || "", ""]; return `<span class="pill ${c}">${esc(l)}${extra}</span>`; };
 
 /* ---------- État de l'interface ---------- */
 const UI = {
-  view: (location.hash.slice(1).split(":")[0]) || "pilotage",
+  view: location.hash.slice(1).split(":")[0],
   planningMode: "liste", planningFilter: "", planningShowPast: false, calMonth: today().slice(0, 7),
   clientsTab: "clients", search: "", facturesTab: "attente",
 };
-const VIEWS = [
-  ["pilotage", "Pilotage", "home"], ["planning", "Planning", "cal"], ["clients", "Clients", "users"],
-  ["factures", "Facturation", "euro"], ["equipe", "Équipe", "team"], ["reglages", "Réglages", "gear"],
+const ALL_VIEWS = [
+  ["direction", "Direction", "home", ["direction"]],
+  ["manon", "Espace Manon", "inbox", ["direction", "admin"]],
+  ["collab", "Collaborateurs", "team", ["direction", "admin"]],
+  ["moi", "Mon espace", "home", ["collaborateur"]],
+  ["planning", "Planning", "cal", ["direction", "admin"]],
+  ["clients", "Clients", "users", ["direction", "admin"]],
+  ["factures", "Facturation", "euro", ["direction", "admin"]],
+  ["equipe", "Équipe", "team2", ["direction", "admin"]],
+  ["reglages", "Réglages", "gear", ["direction", "admin", "collaborateur"]],
 ];
+const SHORT = { manon: "Manon", collab: "Collabs", factures: "Factures", moi: "Mon espace" };
+const HOME = { direction: "direction", admin: "manon", collaborateur: "moi" };
+const viewsFor = () => ALL_VIEWS.filter(v => v[3].includes(ROLE));
+const allowed = v => viewsFor().some(x => x[0] === v);
+function fixView() { if (UI.view === "pilotage") UI.view = "direction"; if (!allowed(UI.view)) UI.view = HOME[ROLE] || "reglages"; }
 
 /* ---------- Rendu principal ---------- */
 function render() {
   const root = $("#root");
   if (REMOTE && !user) { root.innerHTML = loginView(); afterRender(); return; }
+  if (!ROLE) { root.innerHTML = noAccessView(); return; }
+  fixView();
+  const VIEWS = viewsFor();
+  const tabs = VIEWS.length <= 5 ? VIEWS : VIEWS.slice(0, 4);
+  const plus = VIEWS.length <= 5 ? [] : VIEWS.slice(4);
   const lateCount = S.factures.filter(isLate).length;
   const count = v => (v === "factures" && lateCount ? `<span class="count">${lateCount}</span>` : "");
   root.innerHTML = `
   <div class="app">
     <aside class="side">
       <div class="brand"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small><em>Mon App</em></div></div>
-      ${VIEWS.map(([k, l, ic]) => `<button class="nav ${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
+      ${VIEWS.map(([k, l, ic]) => `<button class="nav ${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}" ${UI.view === k ? 'aria-current="page"' : ""}>${icon(ic)}<span>${l}</span>${count(k)}</button>`).join("")}
       <div class="spacer"></div>
-      <div class="who">${REMOTE ? `<b>${esc(me()?.nom || "Connecté")}</b>${esc(user?.email || "")}` : "<b>Mode local</b>données de ce navigateur"}</div>
+      <div class="who">${REMOTE ? `<b>${esc(me()?.nom || MON_NOM || "Connecté")}</b><span>${esc(ROLES[ROLE] || "")}</span>` : `<b>Mode local</b><span>${esc(ROLES[ROLE])}</span>`}</div>
     </aside>
-    <header class="mtop"><img src="assets/emblem.svg" alt=""><b>ETHEREA <span>Mon App</span></b>${S.factures.some(isLate) ? `<span class="pill danger">${S.factures.filter(isLate).length} en retard</span>` : ""}</header>
-    <main>${REMOTE ? "" : `<div class="banner">Mode local : les données restent dans ce navigateur. Connectez Supabase (fichier config.js) pour partager le board avec l'équipe.</div>`}${views[UI.view] ? views[UI.view]() : views.pilotage()}</main>
-    <nav class="tabbar">
-      ${VIEWS.filter(v => v[0] !== "reglages").map(([k, l, ic]) => `<button class="${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
-      <button class="${UI.view === "reglages" ? "on" : ""}" data-act="go" data-v="reglages">${icon("gear")}Réglages</button>
+    <header class="mtop"><img src="assets/emblem.svg" alt=""><b>ETHEREA <span>Mon App</span></b>${isGestion() && lateCount ? `<button class="pill danger" data-act="go" data-v="factures:retard">${lateCount} en retard</button>` : ""}</header>
+    <main>${REMOTE ? "" : `<div class="banner">Mode local : les données restent dans ce navigateur. Connectez Supabase (fichier config.js) pour partager l'app avec l'équipe.</div>`}${views[UI.view]()}</main>
+    <nav class="tabbar" aria-label="Navigation">
+      ${tabs.map(([k, l, ic]) => `<button class="${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}" aria-label="${esc(l)}">${icon(ic)}<span>${SHORT[k] || l}</span>${count(k)}</button>`).join("")}
+      ${plus.length ? `<button class="${plus.some(v => v[0] === UI.view) ? "on" : ""}" data-act="plus">${icon("menu")}<span>${plus.some(v => v[0] === UI.view) ? esc(plus.find(v => v[0] === UI.view)[1]) : "Plus"}</span>${plus.some(v => v[0] === "factures") && lateCount ? `<span class="count">${lateCount}</span>` : ""}</button>` : ""}
     </nav>
   </div>`;
   // Un formulaire en cours de saisie n'est jamais redessiné : seules les fiches se mettent à jour en direct.
@@ -220,7 +276,7 @@ const scheduleRender = () => { clearTimeout(renderTimer); renderTimer = setTimeo
 /* ---------- Vues ---------- */
 const views = {};
 
-views.pilotage = () => {
+views.direction = () => {
   const t = today(), P = params();
   const mStart = t.slice(0, 8) + "01", mEnd = addMonths(mStart, 1);
   const inMonth = d => d && d >= mStart && d < mEnd;
@@ -449,28 +505,161 @@ views.factures = () => {
   <div class="card anim"><div class="tablewrap"><table><thead><tr><th>Facture</th><th class="hide-m">Émise le</th><th class="hide-m">Échéance</th><th class="num">Montant HT</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="empty">Aucune facture dans cette liste.</td></tr>`}</tbody></table></div></div>`;
 };
 
+/* ---------- Espace Manon : la file du jour, action par action ---------- */
+function bloc(id, titre, items, rowFn, vide, extra = "") {
+  return `<div class="card anim" id="${id}"><div class="head"><h2>${titre}</h2>${items.length ? `<span class="pill ${id === "m-relances" ? "danger" : "info"}">${items.length}</span>` : `<span class="pill ok">À jour</span>`}${extra}</div>
+  <div class="rows">${items.length ? items.map(rowFn).join("") : `<div class="empty">${vide}</div>`}</div></div>`;
+}
+const dateBox = s => { const d = parse(s); return `<div class="date"><b>${d ? d.getDate() : "?"}</b><span>${d ? MOIS[d.getMonth()].replace(".", "") : ""}</span></div>`; };
+function tacheRow(x, opts = {}) {
+  const late = x.statut !== "fait" && x.echeance && x.echeance < today();
+  const c = x.client_id && S.clients.length ? client(x.client_id).nom : "";
+  return `<div class="row task ${x.statut === "fait" ? "done" : ""}" ${opts.readonly ? "" : `data-act="open" data-t="taches" data-id="${x.id}"`}>
+    <button class="tick" data-act="toggleTache" data-id="${x.id}" aria-label="${x.statut === "fait" ? "Rouvrir" : "Marquer faite"} : ${esc(x.titre)}" aria-pressed="${x.statut === "fait"}">${icon("check")}</button>
+    <div class="main"><div class="t">${esc(x.titre)}</div><div class="s">${[opts.showAssigne && x.assigne ? esc(x.assigne) : "", c ? esc(c) : "", x.echeance ? `pour le ${fdateShort(x.echeance)}` : ""].filter(Boolean).join(", ") || "&nbsp;"}</div></div>
+    ${late ? `<span class="pill danger">En retard</span>` : x.priorite === "haute" && x.statut !== "fait" ? `<span class="pill danger plain">Prioritaire</span>` : x.statut === "en_cours" ? pill(ST_TACHE, "en_cours") : ""}</div>`;
+}
+const ouvertes = list => list.filter(x => x.statut !== "fait").sort(by(x => (x.priorite === "haute" ? "0" : "1") + (x.echeance || "9999")));
+
+views.manon = () => {
+  const t = today(), nom = ROLE === "admin" ? MON_NOM : "Manon";
+  const aFact = S.interventions.filter(i => i.statut === "realisee" && !i.facture_id && num(i.montant) > 0).sort(by(i => i.date));
+  const relances = S.factures.filter(isLate).sort(by(f => f.echeance));
+  const certif = S.interventions.filter(i => i.statut === "realisee" && !i.certificat_envoye).sort(by(i => i.date)).reverse();
+  const cloturer = S.interventions.filter(i => i.statut === "planifiee" && i.date < t).sort(by(i => i.date));
+  const semaine = S.interventions.filter(i => i.statut === "planifiee" && i.date >= t && i.date <= addDays(t, 7)).sort(by(i => i.date + (i.heure || "")));
+  const sansInterv = semaine.filter(i => !i.technicien);
+  const aPlanifier = S.contrats.filter(c => c.statut === "actif" && c.frequence !== "Ponctuel" && !contratStats(c).prochain);
+  const mesTaches = ouvertes(S.taches.filter(x => estAssigne(x.assigne, nom)));
+  const total = aFact.length + relances.length + certif.length + cloturer.length + sansInterv.length + aPlanifier.length + mesTaches.length;
+  const prenom = ROLE === "admin" ? (MON_NOM || "").split(" ")[0] : "";
+  return `
+  <section class="hero slim anim">
+    <div class="hero-top"><div class="titles"><h1>${ROLE === "admin" ? `Bonjour${prenom ? " " + esc(prenom) : ""}` : "Espace Manon"}</h1>
+      <p class="lead">${total ? `<b>${total} action${total > 1 ? "s" : ""}</b> en attente : facturation, relances, certificats et planning.` : "Tout est à jour. Rien à traiter pour le moment."}</p></div>
+      <div class="hero-actions"><button class="btn outline-w" data-act="new" data-t="factures">${icon("plus")}Facture</button><button class="btn onnavy" data-act="new" data-t="interventions">${icon("plus")}Intervention</button></div></div>
+    <div class="chips">
+      <a class="chip" href="#m-facturer"><b>${aFact.length}</b>à facturer</a>
+      <a class="chip ${relances.length ? "hot" : ""}" href="#m-relances"><b>${relances.length}</b>relances</a>
+      <a class="chip" href="#m-certif"><b>${certif.length}</b>certificats</a>
+      <a class="chip" href="#m-planning"><b>${cloturer.length + sansInterv.length}</b>planning</a>
+    </div>
+  </section>
+  <div class="grid wide">
+    ${bloc("m-facturer", "À facturer", aFact, i => `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}">${dateBox(i.date)}<div class="main"><div class="t">${esc(client(i.client_id).nom)}</div><div class="s">${esc(i.prestation || i.metier || "")}</div></div><span class="amt">${eur2(i.montant)}</span><button class="btn small primary" data-act="facturer" data-id="${i.id}">Facturer</button></div>`, "Toutes les interventions réalisées sont facturées.")}
+    ${bloc("m-relances", "Relances", relances, f => `<div class="row" data-act="open" data-t="factures" data-id="${f.id}"><div class="main"><div class="t">${esc(client(f.client_id).nom)}</div><div class="s">${esc(f.numero || "")}, ${f.nb_relances ? `relancée ${f.nb_relances} fois, dernière le ${fdateShort(f.derniere_relance)}` : "jamais relancée"}</div></div><span class="pill danger">${lateDays(f)} j</span><span class="amt hide-s">${eur2(f.montant_ht)}</span><button class="btn small" data-act="relancer" data-id="${f.id}">${icon("mail")}<span class="hide-s">Relancer</span></button></div>`, "Aucune facture en retard.")}
+    ${bloc("m-certif", "Certificats de passage à envoyer", certif, i => `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}">${dateBox(i.date)}<div class="main"><div class="t">${esc(client(i.client_id).nom)}</div><div class="s">${esc(i.prestation || "")}${i.rapport_risque ? ", rapport de constat à joindre" : ""}</div></div><button class="btn small" data-act="certif" data-id="${i.id}">Envoyé</button></div>`, "Tous les certificats sont partis.")}
+    ${bloc("m-planning", "Planning à mettre à jour", [...cloturer.map(i => ({ ...i, _k: "passee" })), ...sansInterv.map(i => ({ ...i, _k: "sans" }))], i => `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}">${dateBox(i.date)}<div class="main"><div class="t">${esc(client(i.client_id).nom)}</div><div class="s">${i._k === "passee" ? "Date passée, statut à confirmer" : "Aucun intervenant attribué"}</div></div>${i._k === "passee" ? `<button class="btn small primary" data-act="realiser" data-id="${i.id}">Réalisée</button>` : `<button class="btn small" data-act="openEdit" data-t="interventions" data-id="${i.id}">Attribuer</button>`}</div>`, "Le planning est à jour.")}
+    ${bloc("m-contrats", "Contrats sans prochain passage", aPlanifier, c => `<div class="row" data-act="open" data-t="contrats" data-id="${c.id}"><div class="main"><div class="t">${esc(client(c.client_id).nom)}</div><div class="s">${esc(c.prestation || "")}, ${esc(c.frequence || "")}</div></div><button class="btn small" data-act="gen" data-id="${c.id}">Planifier</button></div>`, "Chaque contrat a son prochain passage.")}
+    ${bloc("m-taches", "Mes tâches", mesTaches, x => tacheRow(x), "Aucune tâche en cours.", `<button class="btn small ghost" data-act="newTache" data-v="${esc(nom)}">${icon("plus")}Tâche</button>`)}
+  </div>
+  <div class="card section anim"><div class="head"><h2>7 prochains jours</h2><button class="btn small ghost" data-act="go" data-v="planning">Ouvrir le planning</button></div>
+    <div class="rows">${semaine.length ? semaine.map(interRow).join("") : `<div class="empty">Aucune intervention planifiée cette semaine.</div>`}</div></div>`;
+};
+
+/* ---------- Collaborateurs (vue Direction et Manon) ---------- */
+function collaborateurs() {
+  const names = new Map();
+  const add = (nom, type, extra = {}) => { if (!nom) return; const k = nom.trim().toLowerCase(); names.set(k, { ...(names.get(k) || { nom: nom.trim(), types: new Set() }), ...extra }); names.get(k).types.add(type); };
+  S.acces.filter(a => a.role === "collaborateur").forEach(a => add(a.nom, "compte", { email: a.email }));
+  S.techniciens.filter(x => x.actif !== false).forEach(x => add(x.nom, "Intervenant", { tel: x.tel }));
+  S.membres.filter(m => !/gérant|administration/i.test(m.role || "")).forEach(m => add(m.nom, "Équipe"));
+  S.taches.forEach(x => String(x.assigne || "").split("/").forEach(n => { const k = n.trim().toLowerCase(); if (k && names.has(k)) return; }));
+  return [...names.values()].sort(by(x => x.nom.toLowerCase()));
+}
+views.collab = () => {
+  const t = today(), list = collaborateurs();
+  const toutes = S.taches.slice();
+  const filt = UI.tachesTab || "ouvertes";
+  const shown = filt === "faites" ? toutes.filter(x => x.statut === "fait").sort(by(x => x.updated_at || "")).reverse() : ouvertes(toutes);
+  return `
+  <div class="top"><div class="titles"><h1>Collaborateurs</h1><div class="sub">Équipe interne et intervenants terrain : tâches, interventions et accès à l'app</div></div>
+    <button class="btn primary" data-act="newTache" data-v="">${icon("plus")}Tâche</button></div>
+  <div class="grid people">${list.map(p => {
+    const k = p.nom.toLowerCase();
+    const its = S.interventions.filter(i => i.statut === "planifiee" && i.date >= t && i.date <= addDays(t, 7) && estAssigne(i.technicien, p.nom));
+    const tch = ouvertes(S.taches.filter(x => estAssigne(x.assigne, p.nom)));
+    const lateT = tch.filter(x => x.echeance && x.echeance < t).length;
+    const types = [...p.types].filter(x => x !== "compte");
+    return `<div class="card person anim click" data-act="person" data-v="${esc(p.nom)}">
+      <div class="ph"><span class="avatar" aria-hidden="true">${esc(p.nom.slice(0, 1).toUpperCase())}</span><div class="main"><h3>${esc(p.nom)}</h3><div class="s">${esc(types.join(" et ") || "Collaborateur")}${p.types.has("compte") ? `, <span class="ok-t">accès actif</span>` : ""}</div></div></div>
+      <div class="pstats"><div><b>${its.length}</b><span>intervention${its.length > 1 ? "s" : ""} (7 j)</span></div><div><b class="${lateT ? "bad" : ""}">${tch.length}</b><span>tâche${tch.length > 1 ? "s" : ""}${lateT ? `, ${lateT} en retard` : ""}</span></div></div>
+    </div>`;
+  }).join("") || `<div class="card empty">Aucun collaborateur. Ajoute un intervenant ou un membre dans Équipe.</div>`}</div>
+  <div class="card section anim"><div class="head"><h2>Tâches de l'équipe</h2>
+    <div class="seg"><span class="thumb"></span><button class="${filt === "ouvertes" ? "on" : ""}" data-act="tachesTab" data-v="ouvertes">En cours</button><button class="${filt === "faites" ? "on" : ""}" data-act="tachesTab" data-v="faites">Terminées</button></div></div>
+    <div class="rows">${shown.length ? shown.slice(0, 60).map(x => tacheRow(x, { showAssigne: true })).join("") : `<div class="empty">${filt === "faites" ? "Aucune tâche terminée." : "Aucune tâche en cours. Crée une tâche pour un collaborateur."}</div>`}</div></div>`;
+};
+
+/* ---------- Mon espace (collaborateur) ---------- */
+views.moi = () => {
+  const t = today(), nom = MON_NOM;
+  const its = S.interventions.filter(i => i.statut !== "annulee");
+  const auj = its.filter(i => i.date === t);
+  const avenir = its.filter(i => i.date > t && i.statut === "planifiee").sort(by(i => i.date + (i.heure || "")));
+  const enAttente = its.filter(i => i.date < t && i.statut === "planifiee");
+  const faites = its.filter(i => i.statut === "realisee" && i.date < t).sort(by(i => i.date)).reverse().slice(0, 6);
+  const mesT = ouvertes(S.taches);
+  const fini = S.taches.filter(x => x.statut === "fait").sort(by(x => x.updated_at || "")).reverse().slice(0, 5);
+  const card = i => {
+    const adr = i.client_adresse || "";
+    return `<article class="card job anim ${i.statut}">
+      <div class="jh">${dateBox(i.date)}<div class="main"><h3>${esc(i.client_nom || "Client")}</h3><div class="s">${esc(i.prestation || i.metier || "")}${i.heure ? `, ${esc(i.heure)}` : ""}</div></div>${pill(ST_INTER, i.statut)}</div>
+      ${adr || i.client_tel || i.client_contact ? `<div class="jinfo">${adr ? `<a class="btn small" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(adr)}" target="_blank" rel="noopener">${icon("pin")}<span>${esc(adr)}</span></a>` : ""}${i.client_tel ? `<a class="btn small" href="tel:${esc(i.client_tel.split("/")[0].replace(/[^\d+]/g, ""))}">${icon("phone")}<span>${esc(i.client_contact || "Appeler")}</span></a>` : i.client_contact ? `<span class="sub">Contact : ${esc(i.client_contact)}</span>` : ""}</div>` : ""}
+      ${i.notes ? `<p class="jnotes">${esc(i.notes)}</p>` : ""}
+      <div class="actions">${i.statut !== "realisee" ? `<button class="btn primary" data-act="collabFait" data-id="${i.id}">${icon("check")}Intervention réalisée</button>` : `<button class="btn" data-act="collabAnnulerFait" data-id="${i.id}">Remettre à faire</button>`}
+        <button class="btn ${i.rapport_risque ? "danger" : ""}" data-act="collabRisque" data-id="${i.id}">${i.rapport_risque ? "Constat signalé" : "Signaler un constat à risque"}</button>
+        <button class="btn ghost" data-act="collabNote" data-id="${i.id}">Ajouter une note</button></div>
+    </article>`;
+  };
+  return `
+  <section class="hero slim anim">
+    <div class="hero-top"><div class="titles"><h1>Bonjour${nom ? " " + esc(nom.split(" ")[0]) : ""}</h1>
+      <p class="lead">${auj.length ? `<b>${auj.length} intervention${auj.length > 1 ? "s" : ""}</b> aujourd'hui` : "Aucune intervention aujourd'hui"}${mesT.length ? `, <b>${mesT.length} tâche${mesT.length > 1 ? "s" : ""}</b> à faire` : ""}.</p></div></div>
+  </section>
+  ${enAttente.length ? `<div class="banner anim">${enAttente.length} intervention${enAttente.length > 1 ? "s passées attendent" : " passée attend"} ta confirmation.</div><div class="jobs">${enAttente.map(card).join("")}</div>` : ""}
+  <h2 class="sect anim">Aujourd'hui</h2>
+  <div class="jobs">${auj.length ? auj.map(card).join("") : `<div class="card empty anim">Rien de prévu aujourd'hui.</div>`}</div>
+  <div class="grid two section">
+    <div class="card anim"><div class="head"><h2>Mes tâches</h2>${mesT.length ? `<span class="pill info">${mesT.length}</span>` : ""}</div>
+      <div class="rows">${mesT.length ? mesT.map(x => tacheRow(x, { readonly: true })).join("") : `<div class="empty">Aucune tâche en cours.</div>`}${fini.length ? fini.map(x => tacheRow(x, { readonly: true })).join("") : ""}</div></div>
+    <div class="card anim"><div class="head"><h2>À venir</h2></div>
+      <div class="rows">${avenir.length ? avenir.slice(0, 12).map(i => `<div class="row" data-act="jobOpen" data-id="${i.id}">${dateBox(i.date)}<div class="main"><div class="t">${esc(i.client_nom || "")}</div><div class="s">${esc(i.prestation || "")}${i.heure ? ", " + esc(i.heure) : ""}</div></div></div>`).join("") : `<div class="empty">Aucune intervention à venir.</div>`}</div></div>
+  </div>
+  ${faites.length ? `<div class="card section anim"><div class="head"><h2>Dernières interventions réalisées</h2></div><div class="rows">${faites.map(i => `<div class="row" data-act="jobOpen" data-id="${i.id}">${dateBox(i.date)}<div class="main"><div class="t">${esc(i.client_nom || "")}</div><div class="s">${esc(i.prestation || "")}</div></div>${pill(ST_INTER, i.statut)}</div>`).join("")}</div></div>` : ""}`;
+};
+
 views.equipe = () => {
   const t = today(), horizon = addDays(t, 30);
-  const charge = name => S.interventions.filter(i => i.statut === "planifiee" && i.date >= t && i.date <= horizon && (i.technicien || "").toLowerCase().includes(name.toLowerCase().split(" ")[0])).length;
+  const charge = name => S.interventions.filter(i => i.statut === "planifiee" && i.date >= t && i.date <= horizon && estAssigne(i.technicien, name.split(" ")[0])).length;
   const membres = S.membres.slice().sort(by(m => m.nom));
   const techs = S.techniciens.slice().sort(by(x => (x.actif === false ? "1" : "0") + x.nom));
+  const acces = S.acces.slice().sort(by(a => a.role + a.nom));
   return `
-  <div class="top"><div class="titles"><h1>Équipe</h1><div class="sub">Rôles de la structure et réseau d'intervenants</div></div>
+  <div class="top"><div class="titles"><h1>Équipe</h1><div class="sub">Rôles de la structure, réseau d'intervenants et accès à l'app</div></div>
     <button class="btn" data-act="new" data-t="membres">${icon("plus")}Membre</button>
     <button class="btn primary" data-act="new" data-t="techniciens">${icon("plus")}Intervenant</button></div>
-  <div class="grid kpis">${membres.map(m => `<div class="card kpi anim click" data-act="open" data-t="membres" data-id="${m.id}"><h3>${esc(m.nom)}</h3><div class="pill info" style="margin:8px 0 10px">${esc(m.role || "")}</div><div class="sub">${esc(m.missions || "")}</div>${m.email ? `<div class="sub" style="margin-top:6px">${esc(m.email)}</div>` : ""}<div class="sub" style="margin-top:6px">${charge(m.nom)} intervention(s) sur 30 jours</div></div>`).join("") || `<div class="card empty">Aucun membre.</div>`}</div>
+  <div class="grid kpis">${membres.map(m => `<div class="card kpi anim click" data-act="open" data-t="membres" data-id="${m.id}"><h3>${esc(m.nom)}</h3><div class="pill info plain" style="margin:8px 0 10px">${esc(m.role || "")}</div><div class="sub">${esc(m.missions || "")}</div>${m.email ? `<div class="sub clip" style="margin-top:6px">${esc(m.email)}</div>` : ""}</div>`).join("") || `<div class="card empty">Aucun membre.</div>`}</div>
+  <div class="card section anim"><div class="head"><h2>Accès à l'application</h2>${ROLE === "direction" ? `<button class="btn small primary" data-act="newAcces">${icon("plus")}Donner un accès</button>` : ""}</div>
+    <p class="sub" style="margin:-6px 0 12px">Direction : tout. Manon : gestion sans l'espace Direction. Collaborateur : ses interventions et ses tâches uniquement, sans montants ni factures. Le nom doit correspondre à celui du planning.</p>
+    <div class="rows">${acces.length ? acces.map(a => `<div class="row" ${ROLE === "direction" ? `data-act="editAcces" data-v="${esc(a.email)}"` : ""}><span class="avatar sm" aria-hidden="true">${esc((a.nom || "?").slice(0, 1).toUpperCase())}</span><div class="main"><div class="t">${esc(a.nom)}</div><div class="s">${esc(a.email)}</div></div><span class="pill ${a.role === "direction" ? "accent" : a.role === "admin" ? "info" : "mute"}">${esc(ROLES[a.role] || a.role)}</span></div>`).join("") : `<div class="empty">Aucun accès enregistré.</div>`}</div></div>
   <div class="card section anim"><div class="head"><h2>Intervenants terrain</h2><span class="pill">${techs.filter(x => x.actif !== false).length} actifs</span></div>
-    <div class="tablewrap"><table><thead><tr><th>Nom</th><th>Téléphone</th><th class="hide-m">Secteur</th><th>Fiabilité</th><th class="hide-m">Compétences</th><th class="num">30 j</th></tr></thead><tbody>
-    ${techs.map(x => `<tr class="click" data-act="open" data-t="techniciens" data-id="${x.id}" style="${x.actif === false ? "opacity:.5" : ""}"><td><b>${esc(x.nom)}</b></td><td>${x.tel ? `<a href="tel:${esc(x.tel.replace(/\s/g, ""))}" onclick="event.stopPropagation()">${esc(x.tel)}</a>` : ""}</td><td class="hide-m">${esc(x.secteur || "")}</td><td style="min-width:90px">${x.fiabilite != null ? `<div class="sub">${x.fiabilite} %</div><div class="progress" style="margin:2px 0 0"><i style="width:${num(x.fiabilite)}%;background:${num(x.fiabilite) >= 70 ? "var(--ok)" : num(x.fiabilite) >= 50 ? "var(--warn)" : "var(--danger)"}"></i></div>` : ""}</td><td class="hide-m sub" style="white-space:normal">${esc(x.competences || "")}</td><td class="num">${charge(x.nom)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Aucun intervenant.</td></tr>`}
+    <div class="tablewrap"><table><thead><tr><th>Nom</th><th>Téléphone</th><th class="hide-m">Secteur</th><th>Fiabilité</th><th class="hide-m">Compétences</th><th class="num hide-s">30 j</th></tr></thead><tbody>
+    ${techs.map(x => `<tr class="click" data-act="open" data-t="techniciens" data-id="${x.id}" style="${x.actif === false ? "opacity:.55" : ""}"><td><b>${esc(x.nom)}</b></td><td class="nowrap">${x.tel ? `<a href="tel:${esc(x.tel.replace(/\s/g, ""))}" onclick="event.stopPropagation()">${esc(x.tel)}</a>` : ""}</td><td class="hide-m">${esc(x.secteur || "")}</td><td style="min-width:84px">${x.fiabilite != null ? `<div class="sub">${x.fiabilite} %</div><div class="progress" style="margin:2px 0 0"><i style="width:${num(x.fiabilite)}%;background:${num(x.fiabilite) >= 70 ? "var(--ok)" : num(x.fiabilite) >= 50 ? "var(--warn)" : "var(--error)"}"></i></div>` : ""}</td><td class="hide-m sub" style="white-space:normal">${esc(x.competences || "")}</td><td class="num hide-s">${charge(x.nom)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Aucun intervenant.</td></tr>`}
     </tbody></table></div></div>`;
 };
 
 views.reglages = () => {
   const P = params();
+  const compte = REMOTE ? `<div class="card anim"><h2>Mon compte</h2>
+      <p class="sub" style="margin:-6px 0 14px">${esc(user?.email || "")}, ${esc(ROLES[ROLE] || "")}</p>
+      <form class="form" data-form="password"><div class="field full"><label for="pw-new">Nouveau mot de passe (8 caractères minimum)</label><input id="pw-new" type="password" name="pw" minlength="8" autocomplete="new-password" required></div><div class="full"><button class="btn" type="submit">Changer le mot de passe</button></div></form>
+      <div class="actions"><button class="btn danger" data-act="logout">Se déconnecter</button></div></div>` : `<div class="card anim"><h2>Aperçu des rôles (mode local)</h2><p class="sub" style="margin:-6px 0 14px">Pour tester ce que voit chaque rôle.</p><div class="actions" style="margin:0">${Object.entries(ROLES).map(([k, l]) => `<button class="btn small ${ROLE === k ? "primary" : ""}" data-act="demoRole" data-v="${k}">${esc(l)}</button>`).join("")}</div></div>`;
+  if (ROLE === "collaborateur") return `<div class="top"><div class="titles"><h1>Réglages</h1></div></div><div class="grid two">${compte}</div>`;
   return `
-  <div class="top"><div class="titles"><h1>Réglages</h1><div class="sub">${REMOTE ? `Connecté en tant que ${esc(user?.email || "")} · données partagées Supabase` : "Mode local, données dans ce navigateur"}</div></div></div>
+  <div class="top"><div class="titles"><h1>Réglages</h1><div class="sub">${REMOTE ? "Données partagées en temps réel" : "Mode local, données dans ce navigateur"}</div></div></div>
   <div class="grid two">
-    <div class="card anim"><h2>Paramètres de pilotage</h2>
+    ${ROLE === "direction" ? `<div class="card anim"><h2>Paramètres de pilotage</h2>
       <form class="form" data-form="params">
         ${field({ k: "urssaf", l: "Taux de cotisations (ex. 0,26)", t: "number", step: "0.01" }, P)}
         ${field({ k: "cible_marque", l: "Cible de taux de marque (ex. 0,5)", t: "number", step: "0.01" }, P)}
@@ -481,16 +670,20 @@ views.reglages = () => {
         ${field({ k: "objectif_fin", l: "Date limite de l'objectif", t: "date" }, P)}
         <div class="full actions"><button class="btn primary" type="submit">Enregistrer</button></div>
       </form>
-    </div>
+    </div>` : ""}
+    ${compte}
     <div class="card anim"><h2>Données</h2>
       <p class="sub">Export complet en JSON pour sauvegarde. L'import ajoute ou met à jour les lignes du fichier sans rien supprimer.</p>
-      <div class="actions"><button class="btn" data-act="export">Exporter (JSON)</button><label class="btn">Importer (JSON)<input type="file" accept="application/json" data-on="import" hidden></label></div>
-      ${REMOTE ? `<h2 style="margin-top:22px">Mon compte</h2>
-      <form class="form" data-form="password"><div class="field full"><label>Nouveau mot de passe</label><input type="password" name="pw" minlength="8" autocomplete="new-password" required></div><div class="full"><button class="btn" type="submit">Changer le mot de passe</button></div></form>
-      <div class="actions"><button class="btn danger" data-act="logout">Se déconnecter</button></div>` : ""}
+      <div class="actions"><button class="btn" data-act="export">Exporter (JSON)</button>${ROLE === "direction" ? `<label class="btn">Importer (JSON)<input type="file" accept="application/json" data-on="import" hidden></label>` : ""}</div>
     </div>
   </div>`;
 };
+
+function noAccessView() {
+  return `<div class="login"><div><div class="card anim"><div class="brandline"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small></div></div>
+    <h1>Accès en attente</h1><p class="sub">Le compte ${esc(user?.email || "")} n'a pas encore de rôle dans Mon App. Demande à la Direction de t'ajouter dans Équipe, Accès à l'application.</p>
+    <button class="btn" data-act="logout">Se déconnecter</button></div></div></div>`;
+}
 
 /* ---------- Connexion ---------- */
 function loginView() {
@@ -501,6 +694,7 @@ function loginView() {
     <div class="field"><label>Mot de passe</label><input type="password" name="pw" autocomplete="current-password"></div>
     <button class="btn primary" type="submit">Se connecter</button>
     <button class="btn ghost" type="button" data-act="magic">Recevoir un lien de connexion par email</button>
+    <button class="linkbtn" type="button" data-act="forgot">Mot de passe oublié</button>
     <div class="err" id="loginErr" role="alert"></div></form><p class="tag">La qualité au service d'un environnement sain</p></div></div>`;
 }
 
@@ -550,7 +744,19 @@ const FIELDS = {
     { k: "nom", l: "Nom", req: 1 }, { k: "role", l: "Rôle" }, { k: "email", l: "Email de connexion", full: 1 },
     { k: "missions", l: "Missions", t: "textarea", full: 1 }],
 };
-const TITLES = { clients: "client", contrats: "contrat", interventions: "intervention", factures: "facture", devis: "devis", techniciens: "intervenant", membres: "membre" };
+FIELDS.taches = [
+  { k: "titre", l: "Tâche", req: 1, full: 1 },
+  { k: "assigne", l: "Pour", list: () => [...new Set([...collaborateurs().map(x => x.nom), ...S.acces.map(a => a.nom), "Manon"])] },
+  { k: "echeance", l: "Pour le", t: "date" },
+  { k: "priorite", l: "Priorité", t: "select", opts: Object.entries(PRIO).map(([k, v]) => [k, v[0]]) },
+  { k: "statut", l: "Statut", t: "select", opts: Object.entries(ST_TACHE).map(([k, v]) => [k, v[0]]) },
+  { k: "client_id", l: "Client concerné", t: "select", opts: () => [["", "Aucun"], ...clientOpts()], full: 1 },
+  { k: "notes", l: "Détails", t: "textarea", full: 1 }];
+FIELDS.acces = [
+  { k: "email", l: "Email de connexion", t: "email", req: 1, full: 1 },
+  { k: "nom", l: "Nom (identique au planning, ex. Théo)", req: 1, list: () => [...new Set([...collaborateurs().map(x => x.nom), ...S.membres.map(m => m.nom)])] },
+  { k: "role", l: "Rôle", t: "select", opts: Object.entries(ROLES), req: 1 }];
+const TITLES = { clients: "client", contrats: "contrat", interventions: "intervention", factures: "facture", devis: "devis", techniciens: "intervenant", membres: "membre", taches: "tâche", acces: "accès" };
 
 function field(f, row) {
   const v = row[f.k] ?? "";
@@ -594,6 +800,7 @@ function reopenDrawer(mode) {
   const st = drawerState;
   let html = "";
   if (st.mode === "form") html = formDrawer(st);
+  else if (SPECIAL[st.mode]) html = SPECIAL[st.mode](st);
   else html = detailDrawer(st);
   if (!html) { closeDrawer(); return; }
   const scroll = d.querySelector(".drawer")?.scrollTop || 0;
@@ -611,10 +818,12 @@ function reopenDrawer(mode) {
 }
 function formDrawer(st) {
   const row = st.row;
-  const fem = ["interventions", "factures"].includes(st.table);
-  return `<div class="dh"><div style="margin-right:auto"><h2>${S[st.table].some(r => r.id === row.id) ? "Modifier" : fem ? "Nouvelle" : "Nouveau"} ${TITLES[st.table]}</h2></div><button class="btn outline-w small icon" data-act="close" aria-label="Fermer">${icon("x")}</button></div><div class="body">
+  const fem = ["interventions", "factures", "taches"].includes(st.table);
+  const k = keyOf(st.table), exists = !row._new && !!row[k] && S[st.table].some(r => r[k] === row[k]);
+  return `<div class="dh"><div style="margin-right:auto"><h2>${st.table === "acces" ? (exists ? "Modifier l'accès" : "Donner un accès") : `${exists ? "Modifier" : fem ? "Nouvelle" : "Nouveau"} ${TITLES[st.table]}`}</h2></div><button class="btn outline-w small icon" data-act="close" aria-label="Fermer">${icon("x")}</button></div><div class="body">
   <form class="form" data-form="edit">${FIELDS[st.table].map(f => field(f, row)).join("")}
-    <div class="full actions"><button class="btn primary" type="submit">Enregistrer</button><button class="btn" type="button" data-act="close">Annuler</button><span class="grow"></span>${S[st.table].some(r => r.id === row.id) ? `<button class="btn danger" type="button" data-act="del">Supprimer</button>` : ""}</div>
+    ${st.table === "acces" && !exists ? `<p class="sub full" style="margin:0">Un email d'invitation part à cette adresse : la personne clique sur le lien et choisit son mot de passe.</p>` : ""}
+    <div class="full actions"><button class="btn primary" type="submit">${st.table === "acces" && !exists && REMOTE ? "Envoyer l'invitation" : "Enregistrer"}</button><button class="btn" type="button" data-act="close">Annuler</button><span class="grow"></span>${exists ? `<button class="btn danger" type="button" data-act="del">${st.table === "acces" ? "Retirer l'accès" : "Supprimer"}</button>` : ""}</div>
   </form>`;
 }
 function kv(pairs) { return `<dl class="kv">${pairs.filter(p => p[1] !== null && p[1] !== undefined && p[1] !== "").map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`; }
@@ -685,6 +894,11 @@ function detailDrawer(st) {
     return head(r.nom, esc(r.secteur || "")) + kv([["Téléphone", r.tel ? `<a href="tel:${esc(r.tel.replace(/\s/g, ""))}">${esc(r.tel)}</a>` : ""], ["Fiabilité", r.fiabilite != null ? r.fiabilite + " %" : ""], ["Compétences", esc(r.competences)], ["Statut", r.actif === false ? "Inactif" : "Actif"], ["Notes", esc(r.notes)]]) +
       `<h3>Interventions</h3><div class="rows">${its.slice(0, 15).map(interRow).join("") || `<div class="empty">Aucune intervention.</div>`}</div>`;
   }
+  if (st.table === "taches") {
+    const c = r.client_id && S.clients.length ? client(r.client_id) : null;
+    return head(r.titre, r.assigne ? "Pour " + esc(r.assigne) : "Non attribuée") + kv([["Statut", pill(ST_TACHE, r.statut)], ["Priorité", pill(PRIO, r.priorite)], ["Pour le", r.echeance ? fdate(r.echeance) + (r.statut !== "fait" && r.echeance < today() ? ` <span class="pill danger">En retard</span>` : "") : ""], ["Client", c ? `<button class="linkbtn" data-act="openClient" data-id="${r.client_id}">${esc(c.nom)}</button>` : ""], ["Créée par", esc(r.cree_par)], ["Détails", esc(r.notes)]]) +
+      `<div class="actions"><button class="btn primary" data-act="toggleTache" data-id="${r.id}">${icon("check")}${r.statut === "fait" ? "Rouvrir la tâche" : "Marquer faite"}</button></div>`;
+  }
   if (st.table === "membres") {
     return head(r.nom, esc(r.role || "")) + kv([["Email", mailLinks(r.email)], ["Missions", esc(r.missions)]]);
   }
@@ -693,6 +907,59 @@ function detailDrawer(st) {
 function factRow(f) {
   return `<div class="row" data-act="open" data-t="factures" data-id="${f.id}"><div class="main"><div class="t">${esc(f.numero || "Sans numéro")}</div><div class="s">émise le ${fdate(f.date_emission)}</div></div><span class="amt">${eur2(f.montant_ht)}</span>${isLate(f) ? `<span class="pill danger">Retard ${lateDays(f)} j</span>` : pill(ST_FACT, f.statut)}</div>`;
 }
+
+async function majCollab(id, patch, msg) {
+  const i = S.interventions.find(x => x.id === id); if (!i) return;
+  if (REMOTE && ROLE === "collaborateur") {
+    const { error } = await sb.rpc("maj_mon_intervention", { p_id: id, p_statut: null, p_risque: null, p_notes: null, ...patch });
+    if (error) { toast("Erreur : " + error.message); return; }
+  } else if (!REMOTE) {
+    const base = { ...i }; ["client_nom", "client_adresse", "client_contact", "client_tel"].forEach(k => delete base[k]);
+    const next = { ...base };
+    if (patch.p_statut) next.statut = patch.p_statut;
+    if (patch.p_risque !== undefined) next.rapport_risque = patch.p_risque;
+    if (patch.p_notes !== undefined) next.notes = patch.p_notes;
+    const d = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    d.interventions = (d.interventions || []).map(x => x.id === id ? { ...x, ...next } : x);
+    localStorage.setItem(LS_KEY, JSON.stringify(d));
+  }
+  Object.assign(i, patch.p_statut ? { statut: patch.p_statut } : {}, patch.p_risque !== undefined ? { rapport_risque: patch.p_risque } : {}, patch.p_notes !== undefined ? { notes: patch.p_notes } : {});
+  toast(msg); render(); if (drawerState?.mode === "job") reopenDrawer();
+}
+
+/* ---------- Tiroirs spéciaux ---------- */
+const closeBtn = `<button class="btn outline-w small icon" data-act="close" aria-label="Fermer">${icon("x")}</button>`;
+const SPECIAL = {
+  password: () => `<div class="dh"><div style="margin-right:auto"><h2>Choisis ton mot de passe</h2><div class="sub">Tu pourras ensuite te connecter avec ton email et ce mot de passe.</div></div>${closeBtn}</div><div class="body">
+    <form class="form" data-form="setpw"><div class="field full"><label for="pw1">Mot de passe (8 caractères minimum)</label><input id="pw1" type="password" name="pw" minlength="8" autocomplete="new-password" required></div>
+    <div class="field full"><label for="pw2">Confirmation</label><input id="pw2" type="password" name="pw2" minlength="8" autocomplete="new-password" required></div>
+    <div class="full actions"><button class="btn primary" type="submit">Enregistrer le mot de passe</button></div><div class="err full" id="pwErr" role="alert"></div></form>`,
+  plus: () => {
+    const VIEWS = viewsFor();
+    const late = S.factures.filter(isLate).length;
+    return `<div class="dh"><div style="margin-right:auto"><h2>Menu</h2></div>${closeBtn}</div><div class="body"><div class="menu">${VIEWS.map(([k, l, ic]) => `<button class="nav-l ${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}<span>${esc(l)}</span>${k === "factures" && late ? `<span class="pill danger">${late}</span>` : ""}</button>`).join("")}</div>`;
+  },
+  person: st => {
+    const nom = st.nom, t = today();
+    const its = S.interventions.filter(i => estAssigne(i.technicien, nom) && i.statut !== "annulee");
+    const next = its.filter(i => i.date >= t && i.statut === "planifiee").sort(by(i => i.date));
+    const done = its.filter(i => i.statut === "realisee").sort(by(i => i.date)).reverse().slice(0, 5);
+    const tch = S.taches.filter(x => estAssigne(x.assigne, nom));
+    const acc = S.acces.find(a => a.nom.toLowerCase() === nom.toLowerCase());
+    const tech = S.techniciens.find(x => x.nom.toLowerCase() === nom.toLowerCase());
+    return `<div class="dh"><div style="margin-right:auto"><h2>${esc(nom)}</h2><div class="sub">${acc ? `Accès : ${esc(acc.email)}` : "Pas encore d'accès à l'app"}</div></div>${closeBtn}</div><div class="body">
+      <div class="actions" style="margin:0 0 6px"><button class="btn small primary" data-act="newTache" data-v="${esc(nom)}">${icon("plus")}Tâche</button>${!acc && ROLE === "direction" ? `<button class="btn small" data-act="newAcces" data-v="${esc(nom)}">Donner un accès</button>` : ""}${tech?.tel ? `<a class="btn small" href="tel:${esc(tech.tel.replace(/\s/g, ""))}">${icon("phone")}Appeler</a>` : ""}${tech ? `<button class="btn small ghost" data-act="open" data-t="techniciens" data-id="${tech.id}">Fiche intervenant</button>` : ""}</div>
+      <h3>Tâches</h3><div class="rows">${tch.length ? [...ouvertes(tch), ...tch.filter(x => x.statut === "fait")].map(x => tacheRow(x)).join("") : `<div class="empty">Aucune tâche.</div>`}</div>
+      <h3>Prochaines interventions</h3><div class="rows">${next.length ? next.slice(0, 10).map(interRow).join("") : `<div class="empty">Aucune intervention planifiée.</div>`}</div>
+      ${done.length ? `<h3>Dernières réalisées</h3><div class="rows">${done.map(interRow).join("")}</div>` : ""}`;
+  },
+  job: st => {
+    const i = S.interventions.find(x => x.id === st.id); if (!i) return "";
+    return `<div class="dh"><div style="margin-right:auto"><h2>${esc(i.client_nom || "")}</h2><div class="sub">${fdate(i.date)}${i.heure ? ", " + esc(i.heure) : ""}</div></div>${closeBtn}</div><div class="body">` +
+      kv([["Prestation", esc(i.prestation || i.metier)], ["Statut", pill(ST_INTER, i.statut)], ["Adresse", i.client_adresse ? `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(i.client_adresse)}" target="_blank" rel="noopener">${esc(i.client_adresse)}</a>` : ""], ["Contact", esc(i.client_contact)], ["Téléphone", i.client_tel ? `<a href="tel:${esc(i.client_tel.split("/")[0].replace(/[^\d+]/g, ""))}">${esc(i.client_tel)}</a>` : ""], ["Avec", esc(i.technicien)], ["Notes", esc(i.notes)]]) +
+      `<div class="actions">${i.statut !== "realisee" ? `<button class="btn primary" data-act="collabFait" data-id="${i.id}">${icon("check")}Intervention réalisée</button>` : ""}<button class="btn" data-act="collabNote" data-id="${i.id}">Ajouter une note</button></div>`;
+  },
+};
 
 /* ---------- Actions ---------- */
 function defaults(table, extra = {}) {
@@ -704,6 +971,7 @@ function defaults(table, extra = {}) {
     factures: { statut: "en_attente", date_emission: t, echeance: addDays(t, num(P.delai_paiement) || 30), numero: nextNumero("F"), nb_relances: 0 },
     devis: { statut: "envoye", date_envoi: t, metier: METIERS[0], numero: nextNumero("D") },
     techniciens: { actif: true }, membres: {},
+    taches: { statut: "a_faire", priorite: "normale", cree_par: MON_NOM || me()?.nom || "" },
   }[table] || {};
   return { id: uuid(), ...base, ...extra };
 }
@@ -720,6 +988,7 @@ async function creerFacture(inter) {
 const actions = {
   go(el) {
     const [v, sub] = el.dataset.v.split(":");
+    if (!allowed(v)) return;
     UI.view = v; UI.planningSpecial = "";
     if (v === "factures" && sub) UI.facturesTab = sub === "retard" ? "retard" : "attente";
     if (v === "planning" && sub) UI.planningSpecial = sub;
@@ -742,9 +1011,10 @@ const actions = {
   closeOverlay(el, ev) { if (ev.target === el) closeDrawer(); },
   async del() {
     const st = drawerState;
+    if (st.table === "acces" && user?.email && st.row.email === user.email.toLowerCase()) { toast("Tu ne peux pas retirer ton propre accès"); return; }
     const extra = st.table === "clients" ? " Ses contrats et interventions seront aussi supprimés." : "";
-    if (!confirm(`Supprimer définitivement ce ${TITLES[st.table]} ?${extra}`)) return;
-    await store.remove(st.table, st.row.id);
+    if (!confirm(st.table === "acces" ? `Retirer l'accès de ${st.row.nom} ? La personne ne pourra plus rien voir dans l'app.` : `Supprimer définitivement ${["interventions", "factures", "taches"].includes(st.table) ? "cette" : "ce"} ${TITLES[st.table]} ?${extra}`)) return;
+    await store.remove(st.table, st.row[keyOf(st.table)]);
     if (st.table === "clients") { S.contrats = S.contrats.filter(k => k.client_id !== st.row.id); S.interventions = S.interventions.filter(i => i.client_id !== st.row.id); if (!REMOTE) store.saveLocal(); }
     closeDrawer(); render(); toast("Supprimé");
   },
@@ -799,6 +1069,47 @@ const actions = {
     render(); toast(`${n} passage(s) planifié(s)`);
   },
   goDay(el) { UI.view = "planning"; UI.planningSpecial = ""; UI.planningMode = "calendrier"; UI.calMonth = el.dataset.v.slice(0, 7); history.replaceState(null, "", "#planning"); closeDrawer(); render(); window.scrollTo(0, 0); },
+  plus() { openDrawer({ mode: "plus" }); },
+  person(el) { openDrawer({ mode: "person", nom: el.dataset.v }); },
+  jobOpen(el) { openDrawer({ mode: "job", id: el.dataset.id }); },
+  openEdit(el) { const r = S[el.dataset.t].find(x => x.id === el.dataset.id); if (r) openDrawer({ mode: "form", table: el.dataset.t, row: { ...r } }); },
+  newTache(el) { openDrawer({ mode: "form", table: "taches", row: defaults("taches", { assigne: el.dataset.v || "", client_id: drawerState?.table === "clients" ? drawerState.id : null }) }); },
+  tachesTab(el) { UI.tachesTab = el.dataset.v; render(); },
+  async toggleTache(el) {
+    const x = S.taches.find(t => t.id === el.dataset.id); if (!x) return;
+    const statut = x.statut === "fait" ? "a_faire" : "fait";
+    if (REMOTE && ROLE === "collaborateur") {
+      const { data, error } = await sb.from("taches").update({ statut, updated_at: new Date().toISOString() }).eq("id", x.id).select().single();
+      if (error) { toast("Erreur : " + error.message); return; }
+      apply("taches", data); render();
+    } else await save("taches", { ...x, statut });
+    if (drawerState?.mode === "detail" || drawerState?.mode === "person") reopenDrawer();
+    toast(statut === "fait" ? "Tâche faite" : "Tâche rouverte");
+  },
+  newAcces(el) { openDrawer({ mode: "form", table: "acces", row: { email: "", nom: el.dataset.v || "", role: "collaborateur", _new: true } }); },
+  editAcces(el) { const a = S.acces.find(x => x.email === el.dataset.v); if (a) openDrawer({ mode: "form", table: "acces", row: { ...a } }); },
+  demoRole(el) { localStorage.setItem("etherea-role-demo", el.dataset.v); location.hash = ""; location.reload(); },
+  async collabFait(el) { await majCollab(el.dataset.id, { p_statut: "realisee" }, "Intervention marquée réalisée. Merci !"); },
+  async collabAnnulerFait(el) { await majCollab(el.dataset.id, { p_statut: "planifiee" }, "Intervention remise à faire"); },
+  async collabRisque(el) {
+    const i = S.interventions.find(x => x.id === el.dataset.id);
+    if (i.rapport_risque) { await majCollab(i.id, { p_risque: false }, "Signalement retiré"); return; }
+    const txt = prompt("Décris le constat à risque (il sera transmis à Manon pour le rapport) :", "");
+    if (txt === null) return;
+    await majCollab(i.id, { p_risque: true, p_notes: [i.notes, txt.trim() && `Constat : ${txt.trim()}`].filter(Boolean).join(" · ") }, "Constat signalé à l'administration");
+  },
+  async collabNote(el) {
+    const i = S.interventions.find(x => x.id === el.dataset.id);
+    const txt = prompt("Note pour cette intervention :", "");
+    if (!txt || !txt.trim()) return;
+    await majCollab(i.id, { p_notes: [i.notes, `${MON_NOM || "Note"} : ${txt.trim()}`].filter(Boolean).join(" · ") }, "Note ajoutée");
+  },
+  async forgot() {
+    const email = $('[data-form="login"] [name=email]').value.trim();
+    if (!email) { $("#loginErr").textContent = "Indique ton email, puis clique à nouveau."; return; }
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.href.split("#")[0] });
+    $("#loginErr").textContent = error ? "Envoi impossible : " + error.message : "Email envoyé : ouvre le lien pour choisir un nouveau mot de passe.";
+  },
   planMode(el) { UI.planningMode = el.dataset.v; render(); },
   planSpecial(el) { UI.planningSpecial = el.dataset.v; render(); },
   calNav(el) { UI.calMonth = addMonths(UI.calMonth + "-01", +el.dataset.v).slice(0, 7); render(); },
@@ -817,9 +1128,32 @@ const actions = {
   },
 };
 
+async function saveAcces(form) {
+  const st = drawerState;
+  const d = readForm(form, FIELDS.acces);
+  d.email = (d.email || "").toLowerCase();
+  if (!d.email || !d.nom || !d.role) return;
+  const btn = form.querySelector("[type=submit]"); btn.disabled = true; btn.textContent = "Envoi en cours…";
+  try {
+    if (st.row.email && st.row.email !== d.email) await store.remove("acces", st.row.email);
+    if (REMOTE) {
+      const existe = S.acces.some(a => a.email === d.email) && !st.row._new;
+      if (existe) { await store.upsert("acces", d); toast("Accès mis à jour"); }
+      else {
+        const { data, error } = await sb.functions.invoke("inviter", { body: { ...d, redirectTo: location.href.split("#")[0] } });
+        if (error || data?.error) { toast("Erreur : " + (data?.error || error.message)); btn.disabled = false; btn.textContent = "Enregistrer"; return; }
+        apply("acces", { ...d, updated_at: new Date().toISOString() });
+        toast(data.message || "Accès enregistré");
+      }
+    } else { await store.upsert("acces", d); toast("Accès enregistré"); }
+    closeDrawer(); render();
+  } catch (e) { btn.disabled = false; btn.textContent = "Enregistrer"; }
+}
+
 const forms = {
   async edit(form) {
     const st = drawerState;
+    if (st.table === "acces") return saveAcces(form);
     const data = readForm(form, FIELDS[st.table]);
     const row = { ...st.row, ...data };
     const saved = await save(st.table, row);
@@ -830,6 +1164,12 @@ const forms = {
     const specs = ["urssaf", "cible_marque", "delai_paiement", "objectif_ca_mensuel", "objectif_residences"].map(k => ({ k, t: "number" })).concat([{ k: "objectif_debut", t: "date" }, { k: "objectif_fin", t: "date" }]);
     const data = { ...params(), ...readForm(form, specs) };
     await save("parametres", { id: "main", data }); toast("Paramètres enregistrés");
+  },
+  async setpw(form) {
+    if (form.elements.pw.value !== form.elements.pw2.value) { $("#pwErr").textContent = "Les deux mots de passe sont différents."; return; }
+    const { error } = await sb.auth.updateUser({ password: form.elements.pw.value });
+    if (error) { $("#pwErr").textContent = "Erreur : " + error.message; return; }
+    closeDrawer(); toast("Mot de passe enregistré");
   },
   async password(form) {
     const { error } = await sb.auth.updateUser({ password: form.elements.pw.value });
@@ -887,7 +1227,7 @@ document.addEventListener("change", ev => {
   }
 });
 document.addEventListener("keydown", ev => { if (ev.key === "Escape" && drawerState) closeDrawer(); });
-window.addEventListener("hashchange", () => { const v = location.hash.slice(1).split(":")[0]; if (v && v !== UI.view) { UI.view = v; render(); } });
+window.addEventListener("hashchange", () => { const v = location.hash.slice(1).split(":")[0]; if (v && v !== UI.view && ROLE && allowed(v)) { UI.view = v; render(); } });
 
 function toast(msg) {
   document.querySelectorAll(".toast").forEach(x => x.remove());
@@ -960,16 +1300,31 @@ async function boot() {
 }
 let started = false;
 async function start() {
-  try { await store.load(); } catch (e) { $("#root").innerHTML = `<div class="login"><div class="card"><h2>Chargement impossible</h2><p class="sub">${esc(e.message || e)}</p><p class="sub">Vérifie que le fichier supabase/schema.sql a bien été exécuté.</p></div></div>`; return; }
+  try { await store.load(); } catch (e) { $("#root").innerHTML = `<div class="login"><div class="card"><h2>Chargement impossible</h2><p class="sub">${esc(e.message || e)}</p><p class="sub">Vérifie ta connexion internet puis recharge la page.</p><button class="btn primary" onclick="location.reload()">Recharger</button></div></div>`; return; }
+  if (location.hash.includes("access_token")) history.replaceState(null, "", location.pathname + "#" + (HOME[ROLE] || ""));
   render();
-  if (REMOTE && !started) {
+  if (REMOTE && (AUTH_TYPE === "invite" || AUTH_TYPE === "recovery")) openDrawer({ mode: "password" });
+  if (REMOTE && !started && ROLE) {
     started = true;
     sb.channel("etherea").on("postgres_changes", { event: "*", schema: "public" }, p => {
       if (!TABLES.includes(p.table)) return;
-      if (p.eventType === "DELETE") S[p.table] = S[p.table].filter(r => r.id !== p.old.id); else apply(p.table, p.new);
+      if (ROLE === "collaborateur" && p.table === "interventions") { refreshCollab(); return; }
+      const k = keyOf(p.table);
+      if (p.eventType === "DELETE") S[p.table] = S[p.table].filter(r => r[k] !== p.old[k]); else apply(p.table, p.new);
       scheduleRender();
     }).subscribe();
+    if (ROLE === "collaborateur") {
+      setInterval(refreshCollab, 60000);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshCollab(); });
+    }
   }
+}
+async function refreshCollab() {
+  if (!REMOTE || ROLE !== "collaborateur") return;
+  const [t, i] = await Promise.all([sb.from("taches").select("*"), sb.rpc("mes_interventions")]);
+  if (!t.error) S.taches = t.data || [];
+  if (!i.error) S.interventions = i.data || [];
+  scheduleRender();
 }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 boot();

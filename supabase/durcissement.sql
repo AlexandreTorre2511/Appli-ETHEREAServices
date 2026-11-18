@@ -1,0 +1,3 @@
+-- À appliquer : place les fonctions d'aide des règles de sécurité dans un schéma privé, non exposé par l'API,
+-- et retire l'exécution directe de la fonction de déclencheur. Aucun changement de comportement pour l'app.
+-- Contenu identique à la migration "roles_helpers_prives" préparée le 19/11/2026.
