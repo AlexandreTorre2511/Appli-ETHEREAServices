@@ -1,7 +1,7 @@
 {
-  "name": "ETHEREA Board",
+  "name": "ETHEREA Services - Mon App",
   "short_name": "ETHEREA",
-  "description": "Pilotage d'ETHEREA Services : clients, contrats, planning, facturation et équipe.",
+  "description": "Mon App ETHEREA Services : pilotage, planning des interventions, clients et contrats, facturation et équipe.",
   "lang": "fr",
   "start_url": "./",
   "scope": "./",
@@ -9,8 +9,26 @@
   "background_color": "#ffffff",
   "theme_color": "#264875",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
   ]
 }

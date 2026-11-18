@@ -1,4 +1,4 @@
-# ETHEREA Board
+# ETHEREA Services - Mon App
 
 Board de gestion d'ETHEREA Services pour toute l'équipe : pilotage, planning des interventions, clients et contrats, devis, facturation et relances, équipe et intervenants.
 

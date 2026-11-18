@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#264875">
-<title>ETHEREA Services</title>
+<title>ETHEREA Services - Mon App</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ETHEREA">
@@ -46,8 +46,9 @@ a{color:var(--navy);text-underline-offset:2px}
 .side::before{width:340px;height:340px;right:-190px;bottom:-150px;border:46px solid rgba(255,255,255,.05)}
 .side::after{width:150px;height:150px;right:-40px;bottom:-60px;background:var(--navy-dark)}
 .brand{display:flex;align-items:center;gap:12px;padding:0 10px 26px}
-.brand img{width:40px;height:40px;border-radius:11px;flex:none;box-shadow:0 0 0 1px rgba(255,255,255,.18)}
+.brand img{width:42px;height:42px;border-radius:10px;flex:none;box-shadow:0 0 0 1px rgba(255,255,255,.22)}
 .brand b{font-family:var(--font-title);font-weight:800;font-size:1.0625rem;letter-spacing:.02em;display:block;line-height:1.05}
+.brand em{display:block;font-style:normal;font-size:.75rem;font-weight:500;color:var(--accent);margin-top:6px}
 .brand small{display:block;font-size:.625rem;font-weight:700;letter-spacing:.32em;text-transform:uppercase;opacity:.72;margin-top:3px}
 .nav{position:relative;display:flex;align-items:center;gap:12px;min-height:46px;padding:0 14px;border-radius:var(--pill);border:0;background:none;cursor:pointer;color:rgba(255,255,255,.78);font-weight:500;text-align:left;width:100%;transition:background .2s var(--ease),color .2s var(--ease)}
 .nav svg{width:20px;height:20px;flex:none}
@@ -255,6 +256,7 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--navy)}
   .mtop{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:30;background:var(--navy);color:#fff;padding:calc(10px + var(--safe-t)) 16px 10px}
   .mtop img{width:32px;height:32px;border-radius:9px}
   .mtop b{font-family:var(--font-title);font-weight:800;letter-spacing:.02em;margin-right:auto}
+  .mtop b span{font-family:var(--font-text);font-weight:500;color:var(--accent);margin-left:4px}
   main{padding:18px 14px calc(104px + var(--safe-b))}
   .top{margin-bottom:16px}
   .top h1{font-size:1.5rem}

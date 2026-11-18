@@ -198,12 +198,12 @@ function render() {
   root.innerHTML = `
   <div class="app">
     <aside class="side">
-      <div class="brand"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small></div></div>
+      <div class="brand"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small><em>Mon App</em></div></div>
       ${VIEWS.map(([k, l, ic]) => `<button class="nav ${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
       <div class="spacer"></div>
       <div class="who">${REMOTE ? `<b>${esc(me()?.nom || "Connecté")}</b>${esc(user?.email || "")}` : "<b>Mode local</b>données de ce navigateur"}</div>
     </aside>
-    <header class="mtop"><img src="assets/emblem.svg" alt=""><b>ETHEREA</b>${S.factures.some(isLate) ? `<span class="pill danger">${S.factures.filter(isLate).length} en retard</span>` : ""}</header>
+    <header class="mtop"><img src="assets/emblem.svg" alt=""><b>ETHEREA <span>Mon App</span></b>${S.factures.some(isLate) ? `<span class="pill danger">${S.factures.filter(isLate).length} en retard</span>` : ""}</header>
     <main>${REMOTE ? "" : `<div class="banner">Mode local : les données restent dans ce navigateur. Connectez Supabase (fichier config.js) pour partager le board avec l'équipe.</div>`}${views[UI.view] ? views[UI.view]() : views.pilotage()}</main>
     <nav class="tabbar">
       ${VIEWS.filter(v => v[0] !== "reglages").map(([k, l, ic]) => `<button class="${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
@@ -496,7 +496,7 @@ views.reglages = () => {
 function loginView() {
   return `<div class="login"><div><form class="card anim" data-form="login">
     <div class="brandline"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small></div></div>
-    <h1>Espace équipe</h1><div class="sub">Pilotage, planning et facturation d'ETHEREA Services.</div>
+    <h1>Mon App</h1><div class="sub">Pilotage, planning et facturation d'ETHEREA Services.</div>
     <div class="field"><label>Email</label><input type="email" name="email" autocomplete="email" required></div>
     <div class="field"><label>Mot de passe</label><input type="password" name="pw" autocomplete="current-password"></div>
     <button class="btn primary" type="submit">Se connecter</button>
