@@ -41,6 +41,11 @@ const SERVICES = ["Dératisation et désouratisation", "Désinsectisation blatte
 const TABLES = ["clients", "contrats", "factures", "interventions", "devis", "techniciens", "membres", "parametres"];
 const DEFAULT_PARAMS = { urssaf: 0.26, cible_marque: 0.5, delai_paiement: 30, objectif_residences: 3, objectif_debut: "2026-10-30", objectif_fin: "2026-12-31", objectif_ca_mensuel: 0 };
 
+/* ---------- Mouvement ---------- */
+const REDUCED = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+const MOTION = !REDUCED && window.Motion && window.Motion.animate ? window.Motion : null;
+const EASE = [0.2, 0, 0, 1];
+
 /* ---------- Données ---------- */
 const S = Object.fromEntries(TABLES.map(t => [t, []]));
 const cfg = window.ETHEREA_CONFIG || {};
@@ -51,6 +56,7 @@ let sb = null, user = null;
 const params = () => ({ ...DEFAULT_PARAMS, ...((S.parametres.find(p => p.id === "main") || {}).data || {}) });
 const client = id => S.clients.find(c => c.id === id) || { nom: "Client inconnu" };
 const contrat = id => S.contrats.find(c => c.id === id);
+const me = () => (user?.email ? S.membres.find(m => m.email && m.email.toLowerCase() === user.email.toLowerCase()) : null);
 
 const store = {
   async load() {
@@ -186,17 +192,18 @@ const VIEWS = [
 /* ---------- Rendu principal ---------- */
 function render() {
   const root = $("#root");
-  if (REMOTE && !user) { root.innerHTML = loginView(); return; }
+  if (REMOTE && !user) { root.innerHTML = loginView(); afterRender(); return; }
   const lateCount = S.factures.filter(isLate).length;
   const count = v => (v === "factures" && lateCount ? `<span class="count">${lateCount}</span>` : "");
   root.innerHTML = `
   <div class="app">
     <aside class="side">
-      <div class="brand"><img src="icon.svg" alt=""><div><b>ETHEREA</b><small>Services · Board</small></div></div>
+      <div class="brand"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small></div></div>
       ${VIEWS.map(([k, l, ic]) => `<button class="nav ${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
       <div class="spacer"></div>
-      <div class="who">${REMOTE ? esc(user?.email || "") : "Mode local"}</div>
+      <div class="who">${REMOTE ? `<b>${esc(me()?.nom || "Connecté")}</b>${esc(user?.email || "")}` : "<b>Mode local</b>données de ce navigateur"}</div>
     </aside>
+    <header class="mtop"><img src="assets/emblem.svg" alt=""><b>ETHEREA</b>${S.factures.some(isLate) ? `<span class="pill danger">${S.factures.filter(isLate).length} en retard</span>` : ""}</header>
     <main>${REMOTE ? "" : `<div class="banner">Mode local : les données restent dans ce navigateur. Connectez Supabase (fichier config.js) pour partager le board avec l'équipe.</div>`}${views[UI.view] ? views[UI.view]() : views.pilotage()}</main>
     <nav class="tabbar">
       ${VIEWS.filter(v => v[0] !== "reglages").map(([k, l, ic]) => `<button class="${UI.view === k ? "on" : ""}" data-act="go" data-v="${k}">${icon(ic)}${l}${count(k)}</button>`).join("")}
@@ -205,6 +212,7 @@ function render() {
   </div>`;
   // Un formulaire en cours de saisie n'est jamais redessiné : seules les fiches se mettent à jour en direct.
   if (drawerState && drawerState.mode === "detail") reopenDrawer();
+  afterRender();
 }
 let renderTimer = null;
 const scheduleRender = () => { clearTimeout(renderTimer); renderTimer = setTimeout(render, 60); };
@@ -251,40 +259,70 @@ views.pilotage = () => {
   const marge = caFact - cot - mo - mat;
   const tauxMarque = caFact ? marge / caFact : null;
 
+  // Les 7 prochains jours, posés sur la vague
+  const semaine = Array.from({ length: 7 }, (_, k) => {
+    const d = addDays(t, k);
+    const its = S.interventions.filter(i => i.date === d && i.statut === "planifiee");
+    return { d, its };
+  });
+  const nbSemaine = sum(semaine, x => x.its.length);
+  const prenom = (me()?.nom || "").split(" ")[0];
+  const heure = new Date().getHours();
+  const salut = heure >= 18 ? "Bonsoir" : "Bonjour";
+  const JOURS = ["dim", "lun", "mar", "mer", "jeu", "ven", "sam"];
+  const lead = [
+    nbSemaine ? `<b>${nbSemaine} passage${nbSemaine > 1 ? "s" : ""}</b> prévu${nbSemaine > 1 ? "s" : ""} sur les 7 prochains jours` : "Aucun passage prévu sur les 7 prochains jours",
+    late.length ? `<b>${eur(sum(late, f => f.montant_ht))}</b> d'impayés à relancer` : "aucun impayé en retard",
+  ].join(", ") + ".";
+  const wave = "M0 23 C 58 4, 117 4, 175 23 S 292 42, 350 23 S 467 4, 525 23 S 642 42, 700 23";
+
   return `
-  <div class="top"><div><h1>Pilotage</h1><div class="sub">${MOIS_L[+t.slice(5, 7) - 1]} ${year}${REMOTE ? " · mis à jour en direct" : ""}</div></div>
-    <button class="btn" data-act="new" data-t="devis">${icon("plus")}Devis</button>
-    <button class="btn primary" data-act="new" data-t="interventions">${icon("plus")}Intervention</button></div>
+  <section class="hero anim">
+    <div class="hero-top">
+      <div class="titles"><h1>${salut}${prenom ? " " + esc(prenom) : ""}</h1><p class="lead">${lead}</p></div>
+      <div class="hero-actions"><button class="btn outline-w" data-act="new" data-t="devis">${icon("plus")}Devis</button><button class="btn onnavy" data-act="new" data-t="interventions">${icon("plus")}Intervention</button></div>
+    </div>
+    <div class="week">
+      <svg class="wave" viewBox="0 0 700 46" preserveAspectRatio="none" aria-hidden="true"><path d="${wave}" pathLength="1"/></svg>
+      <div class="days">${semaine.map(x => {
+        const dd = parse(x.d);
+        const n = x.its.length;
+        const label = n === 1 ? esc(client(x.its[0].client_id).nom.replace(/^(Copropriété|Restaurant) /, "")) : n ? `<b>${n}</b> passages` : "";
+        const act = n === 1 ? `data-act="open" data-t="interventions" data-id="${x.its[0].id}"` : `data-act="goDay" data-v="${x.d}"`;
+        return `<button class="day ${n ? "busy" : ""} ${x.d === t ? "today" : ""}" ${act} aria-label="${fdate(x.d)}, ${n} passage(s)"><span class="dn">${x.d === t ? "auj." : JOURS[dd.getDay()]}</span><span class="dot">${dd.getDate()}</span><span class="dc">${label}</span></button>`;
+      }).join("")}</div>
+    </div>
+  </section>
 
   <div class="grid kpis k6">
-    <div class="card kpi"><div class="label">CA facturé ce mois</div><div class="value">${eur(caFact)}</div><div class="hint">${fMois.length} facture${fMois.length > 1 ? "s" : ""}${P.objectif_ca_mensuel ? ` · objectif ${eur(P.objectif_ca_mensuel)}` : ""}</div>${P.objectif_ca_mensuel ? `<div class="progress"><i style="width:${Math.min(100, caFact / P.objectif_ca_mensuel * 100)}%"></i></div>` : ""}</div>
-    <div class="card kpi"><div class="label">Encaissé ce mois</div><div class="value">${eur(caEnc)}</div><div class="hint">${eur(sum(attente, f => f.montant_ht))} restent à encaisser</div></div>
-    <div class="card kpi ${late.length ? "alert" : "good"}" data-act="go" data-v="factures:retard" style="cursor:pointer"><div class="label">Impayés en retard</div><div class="value">${eur(sum(late, f => f.montant_ht))}</div><div class="hint">${late.length} facture${late.length > 1 ? "s" : ""} échue${late.length > 1 ? "s" : ""}</div></div>
-    <div class="card kpi"><div class="label">CA récurrent annuel</div><div class="value">${eur(recurrent)}</div><div class="hint">${actifs.length} contrats actifs · ${restants} passages restants en ${year}</div></div>
-    <div class="card kpi"><div class="label">Objectif résidences syndic</div><div class="value">${residences} / ${P.objectif_residences}</div><div class="hint">signées depuis le ${fdateShort(P.objectif_debut)} · J-${joursObj}</div><div class="progress"><i style="width:${Math.min(100, residences / Math.max(1, P.objectif_residences) * 100)}%"></i></div></div>
-    <div class="card kpi"><div class="label">Devis du mois</div><div class="value">${devisMois.length}</div><div class="hint">${eur(sum(devisMois, d => d.montant_ht))} envoyés · ${devisSignes.length} signé${devisSignes.length > 1 ? "s" : ""}${taux !== null ? ` · ${pct(taux)}` : ""}</div></div>
+    <div class="card kpi anim"><div class="label">CA facturé ce mois</div><div class="value" data-count="${caFact}" data-fmt="eur">${eur(caFact)}</div><div class="hint">${fMois.length} facture${fMois.length > 1 ? "s" : ""}${P.objectif_ca_mensuel ? ` · objectif ${eur(P.objectif_ca_mensuel)}` : ""}</div>${P.objectif_ca_mensuel ? `<div class="progress"><i style="width:${Math.min(100, caFact / P.objectif_ca_mensuel * 100)}%"></i></div>` : ""}</div>
+    <div class="card kpi anim"><div class="label">Encaissé ce mois</div><div class="value" data-count="${caEnc}" data-fmt="eur">${eur(caEnc)}</div><div class="hint">${eur(sum(attente, f => f.montant_ht))} restent à encaisser</div></div>
+    <div class="card kpi anim click ${late.length ? "alert" : "good"}" data-act="go" data-v="factures:retard"><div class="label">Impayés en retard</div><div class="value" data-count="${sum(late, f => f.montant_ht)}" data-fmt="eur">${eur(sum(late, f => f.montant_ht))}</div><div class="hint">${late.length} facture${late.length > 1 ? "s" : ""} échue${late.length > 1 ? "s" : ""}</div></div>
+    <div class="card kpi anim"><div class="label">CA récurrent annuel</div><div class="value" data-count="${recurrent}" data-fmt="eur">${eur(recurrent)}</div><div class="hint">${actifs.length} contrats actifs, ${restants} passages restants en ${year}</div></div>
+    <div class="card kpi anim"><div class="label">Objectif résidences syndic</div><div class="value">${residences} / ${P.objectif_residences}</div><div class="hint">signées depuis le ${fdateShort(P.objectif_debut)}, J-${joursObj}</div><div class="progress"><i style="width:${Math.min(100, residences / Math.max(1, P.objectif_residences) * 100)}%"></i></div></div>
+    <div class="card kpi anim"><div class="label">Devis du mois</div><div class="value">${devisMois.length}</div><div class="hint">${eur(sum(devisMois, d => d.montant_ht))} envoyés, ${devisSignes.length} signé${devisSignes.length > 1 ? "s" : ""}${taux !== null ? ` (${pct(taux)})` : ""}</div></div>
   </div>
 
   <div class="grid two section">
-    <div class="card"><div class="head"><h2>À traiter</h2></div>
-      <div class="rows">${al.length ? al.map(a => `<div class="row" data-act="go" data-v="${a.go}"><span class="pill ${a.lvl}">${a.lvl === "danger" ? "Urgent" : a.lvl === "warn" ? "À faire" : "À suivre"}</span><div class="main"><div class="t" style="white-space:normal">${esc(a.txt)}</div></div>${icon("right").replace("<svg", '<svg style="width:16px;color:var(--faint)"')}</div>`).join("") : `<div class="empty">Rien d'urgent. Tout est à jour.</div>`}</div>
+    <div class="card anim"><div class="head"><h2>À traiter</h2></div>
+      <div class="rows">${al.length ? al.map(a => `<div class="row" data-act="go" data-v="${a.go}"><span class="pill ${a.lvl}">${a.lvl === "danger" ? "Urgent" : a.lvl === "warn" ? "À faire" : "À suivre"}</span><div class="main"><div class="t" style="white-space:normal">${esc(a.txt)}</div></div>${icon("right").replace("<svg", '<svg class="chev"')}</div>`).join("") : `<div class="empty">Rien d'urgent. Tout est à jour.</div>`}</div>
     </div>
-    <div class="card"><div class="head"><h2>14 prochains jours</h2><button class="btn small ghost" data-act="go" data-v="planning">Planning</button></div>
+    <div class="card anim"><div class="head"><h2>14 prochains jours</h2><button class="btn small ghost" data-act="go" data-v="planning">Ouvrir le planning</button></div>
       <div class="rows">${prochaines.length ? prochaines.map(interRow).join("") : `<div class="empty">Aucune intervention planifiée.</div>`}</div>
     </div>
   </div>
 
   <div class="grid two section">
-    <div class="card"><div class="head"><h2>CA facturé ${year}</h2><span class="pill accent">${eur(caAnnee)}</span></div>
-      <div class="bars">${months.map(x => `<div class="b ${x.m === +t.slice(5, 7) - 1 ? "cur" : ""}" title="${MOIS_L[x.m]} : ${eur(x.v)}"><em>${x.v ? Math.round(x.v) : ""}</em><i style="height:${x.v / maxM * 100}%"></i><span>${["jan", "fév", "mar", "avr", "mai", "juin", "juil", "août", "sep", "oct", "nov", "déc"][x.m]}</span></div>`).join("")}</div>
+    <div class="card anim"><div class="head"><h2>CA facturé ${year}</h2><span class="pill accent">${eur(caAnnee)}</span></div>
+      <div class="bars">${months.map(x => `<div class="b ${x.v ? "has" : ""} ${x.m === +t.slice(5, 7) - 1 ? "cur" : ""}" title="${MOIS_L[x.m]} : ${eur(x.v)}"><em>${x.v ? Math.round(x.v) : ""}</em><i style="height:${x.v / maxM * 100}%"></i><span>${["jan", "fév", "mar", "avr", "mai", "juin", "juil", "août", "sep", "oct", "nov", "déc"][x.m]}</span></div>`).join("")}</div>
     </div>
-    <div class="card"><div class="head"><h2>Rentabilité du mois</h2>${tauxMarque !== null ? `<span class="pill ${tauxMarque >= P.cible_marque ? "ok" : "warn"}">Taux de marque ${pct(tauxMarque)}</span>` : ""}</div>
-      <dl class="kv" style="grid-template-columns:1fr auto">
-        <dt>CA facturé HT</dt><dd class="num"><b>${eur(caFact)}</b></dd>
-        <dt>Cotisations (${pct(P.urssaf)})</dt><dd class="num">${eur(-cot)}</dd>
-        <dt>Main d'œuvre</dt><dd class="num">${eur(-mo)}</dd>
-        <dt>Matériel et déplacement</dt><dd class="num">${eur(-mat)}</dd>
-        <dt><b>Marge</b></dt><dd class="num"><b>${eur(marge)}</b></dd>
+    <div class="card anim"><div class="head"><h2>Rentabilité du mois</h2>${tauxMarque !== null ? `<span class="pill ${tauxMarque >= P.cible_marque ? "ok" : "warn"}">Taux de marque ${pct(tauxMarque)}</span>` : ""}</div>
+      <dl class="kv money">
+        <dt>CA facturé HT</dt><dd><b>${eur(caFact)}</b></dd>
+        <dt>Cotisations (${pct(P.urssaf)})</dt><dd>${eur(-cot)}</dd>
+        <dt>Main d'œuvre</dt><dd>${eur(-mo)}</dd>
+        <dt>Matériel et déplacement</dt><dd>${eur(-mat)}</dd>
+        <dt class="total">Marge</dt><dd class="total">${eur(marge)}</dd>
       </dl>
       <div class="sub">Cible de taux de marque : ${pct(P.cible_marque)}. Main d'œuvre et matériel se saisissent sur chaque facture.</div>
       ${parMetier.length ? `<h3 style="margin:16px 0 10px">Activité réalisée par métier (${year})</h3><div class="split">${parMetier.map(x => `<div><div class="l"><span>${esc(x.m)}</span><b>${eur(x.v)}</b></div><div class="progress" style="margin:0"><i style="width:${x.v / maxMet * 100}%"></i></div></div>`).join("")}</div>` : ""}
@@ -297,7 +335,7 @@ function interRow(i) {
   const c = client(i.client_id);
   return `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}">
     <div class="date"><b>${d ? d.getDate() : "?"}</b><span>${d ? MOIS[d.getMonth()].replace(".", "") : ""}</span></div>
-    <div class="main"><div class="t">${esc(c.nom)}</div><div class="s">${esc(i.prestation || i.metier || "")}${i.technicien ? " · " + esc(i.technicien) : ""}${i.heure ? " · " + esc(i.heure) : ""}</div></div>
+    <div class="main"><div class="t">${esc(c.nom)}</div><div class="s">${esc(i.prestation || i.metier || "")}${i.technicien ? ", " + esc(i.technicien) : ""}${i.heure ? ", " + esc(i.heure) : ""}</div></div>
     ${pill(ST_INTER, i.statut)}</div>`;
 }
 
@@ -318,17 +356,17 @@ views.planning = () => {
     if (UI.planningShowPast && !special) list.reverse();
     const groups = {};
     list.forEach(i => { const k = (i.date || "").slice(0, 7); (groups[k] = groups[k] || []).push(i); });
-    body = Object.keys(groups).length ? Object.entries(groups).map(([k, arr]) => `<div class="card section"><div class="head"><h2>${k ? MOIS_L[+k.slice(5) - 1] + " " + k.slice(0, 4) : "Sans date"}</h2><span class="pill">${arr.length}</span><span class="pill accent">${eur(sum(arr, i => i.montant))}</span></div><div class="rows">${arr.map(interRow).join("")}</div></div>`).join("")
-      : `<div class="card"><div class="empty">Aucune intervention ${special ? "dans cette liste" : "à venir"}.</div></div>`;
+    body = Object.keys(groups).length ? Object.entries(groups).map(([k, arr]) => `<div class="card section anim"><div class="head"><h2>${k ? MOIS_L[+k.slice(5) - 1] + " " + k.slice(0, 4) : "Sans date"}</h2><span class="pill">${arr.length}</span><span class="pill accent">${eur(sum(arr, i => i.montant))}</span></div><div class="rows">${arr.map(interRow).join("")}</div></div>`).join("")
+      : `<div class="card anim"><div class="empty">Aucune intervention ${special ? "dans cette liste" : "à venir"}.</div></div>`;
   }
   return `
-  <div class="top"><div><h1>Planning</h1><div class="sub">${title || "Passages sous contrat et interventions ponctuelles"}</div></div>
+  <div class="top"><div class="titles"><h1>Planning</h1><div class="sub">${title || "Passages sous contrat et interventions ponctuelles"}</div></div>
     <button class="btn" data-act="genAll">Générer les passages des contrats</button>
     <button class="btn primary" data-act="new" data-t="interventions">${icon("plus")}Intervention</button></div>
   <div class="toolbar">
-    ${special ? `<button class="btn small" data-act="planSpecial" data-v="">${icon("left")}Tout le planning</button>` : `<div class="seg"><button class="${UI.planningMode === "liste" ? "on" : ""}" data-act="planMode" data-v="liste">Liste</button><button class="${UI.planningMode === "calendrier" ? "on" : ""}" data-act="planMode" data-v="calendrier">Calendrier</button></div>`}
+    ${special ? `<button class="btn small" data-act="planSpecial" data-v="">${icon("left")}Tout le planning</button>` : `<div class="seg"><span class="thumb"></span><button class="${UI.planningMode === "liste" ? "on" : ""}" data-act="planMode" data-v="liste">Liste</button><button class="${UI.planningMode === "calendrier" ? "on" : ""}" data-act="planMode" data-v="calendrier">Calendrier</button></div>`}
     <select class="search" style="max-width:220px" data-on="planFilter"><option value="">Tous les intervenants</option>${techs.map(x => `<option ${x === f ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>
-    ${UI.planningMode === "liste" && !special ? `<label class="sub" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-on="planPast" ${UI.planningShowPast ? "checked" : ""}> Afficher l'historique</label>` : ""}
+    ${UI.planningMode === "liste" && !special ? `<label class="chk"><input type="checkbox" data-on="planPast" ${UI.planningShowPast ? "checked" : ""}> Afficher l'historique</label>` : ""}
   </div>
   ${body}`;
 };
@@ -342,10 +380,10 @@ function calendar(list) {
     const d = new Date(start); d.setDate(start.getDate() + k);
     const s = ymd(d);
     const evs = list.filter(i => i.date === s).sort(by(i => i.heure || ""));
-    cells.push(`<div class="day ${d.getMonth() !== m - 1 ? "out" : ""} ${s === today() ? "today" : ""}"><span class="n">${d.getDate()}</span>${evs.map(i => `<span class="ev ${i.statut}" data-act="open" data-t="interventions" data-id="${i.id}" title="${esc(client(i.client_id).nom)}">${esc(client(i.client_id).nom)}</span>`).join("")}</div>`);
+    cells.push(`<div class="cd ${d.getMonth() !== m - 1 ? "out" : ""} ${s === today() ? "today" : ""}"><span class="n">${d.getDate()}</span>${evs.map(i => `<span class="ev ${i.statut}" data-act="open" data-t="interventions" data-id="${i.id}" title="${esc(client(i.client_id).nom)}">${esc(client(i.client_id).nom)}</span>`).join("")}</div>`);
     if (k >= 34 && d.getMonth() !== m - 1 && d.getDay() === 0) break;
   }
-  return `<div class="card"><div class="head"><button class="btn small" data-act="calNav" data-v="-1">${icon("left")}</button><h2 style="text-align:center;margin:0 auto">${MOIS_L[m - 1]} ${y}</h2><button class="btn small" data-act="calNav" data-v="1">${icon("right")}</button></div>
+  return `<div class="card anim"><div class="head"><button class="btn small icon" data-act="calNav" data-v="-1" aria-label="Mois précédent">${icon("left")}</button><h2 style="text-align:center;margin:0 auto">${MOIS_L[m - 1]} ${y}</h2><button class="btn small icon" data-act="calNav" data-v="1" aria-label="Mois suivant">${icon("right")}</button></div>
   <div class="cal">${["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"].map(d => `<div class="dow">${d}</div>`).join("")}${cells.join("")}</div></div>`;
 }
 
@@ -361,7 +399,7 @@ views.clients = () => {
       const late = S.factures.some(f => f.client_id === c.id && isLate(f));
       return `<tr class="click" data-act="open" data-t="clients" data-id="${c.id}"><td><b>${esc(c.nom)}</b><div class="sub">${esc(c.adresse || "")}</div></td><td class="hide-m">${esc(c.type || "")}</td><td class="hide-m">${esc(c.syndic || "")}</td><td class="num">${ks.length}</td><td class="num hide-m">${eur(sum(ks, annuel))}</td><td class="num">${du ? `<span class="pill ${late ? "danger" : "warn"}">${eur(du)}</span>` : ""}</td></tr>`;
     }).join("");
-    body = `<div class="card"><div class="tablewrap"><table><thead><tr><th>Client</th><th class="hide-m">Type</th><th class="hide-m">Syndic</th><th class="num">Contrats</th><th class="num hide-m">Annuel HT</th><th class="num">À encaisser</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="empty">Aucun client.</td></tr>`}</tbody></table></div></div>`;
+    body = `<div class="card anim"><div class="tablewrap"><table><thead><tr><th>Client</th><th class="hide-m">Type</th><th class="hide-m">Syndic</th><th class="num">Contrats</th><th class="num hide-m">Annuel HT</th><th class="num">À encaisser</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="empty">Aucun client.</td></tr>`}</tbody></table></div></div>`;
   } else if (tab === "contrats") {
     btn = `<button class="btn primary" data-act="new" data-t="contrats">${icon("plus")}Contrat</button>`;
     const list = S.contrats.filter(k => match(k.numero, client(k.client_id).nom, k.prestation, k.technicien)).sort(by(k => (k.statut === "actif" ? "0" : "1") + client(k.client_id).nom));
@@ -370,18 +408,18 @@ views.clients = () => {
       const denProche = st.denonciation && st.denonciation >= today() && st.denonciation <= addDays(today(), 45);
       return `<tr class="click" data-act="open" data-t="contrats" data-id="${k.id}"><td><b>${esc(client(k.client_id).nom)}</b><div class="sub">${esc(k.numero || "Sans numéro")} · ${esc(k.prestation || "")}</div></td><td class="hide-m">${esc(k.frequence || "")}</td><td class="num hide-m">${eur2(k.prix_passage)}</td><td class="num">${eur(annuel(k))}</td><td class="num">${st.realises}/${num(k.passages_par_an)}</td><td>${st.prochain ? fdateShort(st.prochain.date) : k.statut === "actif" && k.frequence !== "Ponctuel" ? `<span class="pill warn">À planifier</span>` : ""}</td><td class="hide-m">${st.echeance ? `${fdate(st.echeance)}<div class="sub ${denProche ? "" : ""}" style="${denProche ? "color:var(--warn);font-weight:700" : ""}">dénoncer avant ${fdateShort(st.denonciation)}</div>` : ""}</td><td>${pill(ST_CONTRAT, k.statut)}</td></tr>`;
     }).join("");
-    body = `<div class="card"><div class="tablewrap"><table><thead><tr><th>Contrat</th><th class="hide-m">Fréquence</th><th class="num hide-m">Par passage</th><th class="num">Annuel HT</th><th class="num">Réalisés</th><th>Prochain</th><th class="hide-m">Échéance</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="empty">Aucun contrat.</td></tr>`}</tbody></table></div></div>`;
+    body = `<div class="card anim"><div class="tablewrap"><table><thead><tr><th>Contrat</th><th class="hide-m">Fréquence</th><th class="num hide-m">Par passage</th><th class="num">Annuel HT</th><th class="num">Réalisés</th><th>Prochain</th><th class="hide-m">Échéance</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="empty">Aucun contrat.</td></tr>`}</tbody></table></div></div>`;
   } else {
     btn = `<button class="btn primary" data-act="new" data-t="devis">${icon("plus")}Devis</button>`;
     const list = S.devis.filter(d => match(d.numero, client(d.client_id).nom, d.service, d.metier)).sort(by(d => d.date_envoi || "")).reverse();
     const rows = list.map(d => `<tr class="click" data-act="open" data-t="devis" data-id="${d.id}"><td><b>${esc(client(d.client_id).nom)}</b><div class="sub">${esc(d.numero || "")} · ${esc(d.service || d.metier || "")}</div></td><td class="hide-m">${fdate(d.date_envoi)}</td><td class="num">${eur2(d.montant_ht)}</td><td>${pill(ST_DEVIS, d.statut)}</td></tr>`).join("");
     const env = S.devis.length, sig = S.devis.filter(d => d.statut === "signe");
-    body = `<div class="grid kpis" style="margin-bottom:14px"><div class="card kpi"><div class="label">Devis envoyés</div><div class="value">${env}</div><div class="hint">${eur(sum(S.devis, d => d.montant_ht))}</div></div><div class="card kpi"><div class="label">Signés</div><div class="value">${sig.length}</div><div class="hint">${eur(sum(sig, d => d.montant_ht))}${env ? ` · ${pct(sig.length / env)}` : ""}</div></div></div>
-    <div class="card"><div class="tablewrap"><table><thead><tr><th>Devis</th><th class="hide-m">Envoyé le</th><th class="num">Montant HT</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">Aucun devis.</td></tr>`}</tbody></table></div></div>`;
+    body = `<div class="grid kpis" style="margin-bottom:16px"><div class="card kpi anim"><div class="label">Devis envoyés</div><div class="value">${env}</div><div class="hint">${eur(sum(S.devis, d => d.montant_ht))}</div></div><div class="card kpi anim"><div class="label">Signés</div><div class="value">${sig.length}</div><div class="hint">${eur(sum(sig, d => d.montant_ht))}${env ? ` · ${pct(sig.length / env)}` : ""}</div></div></div>
+    <div class="card anim"><div class="tablewrap"><table><thead><tr><th>Devis</th><th class="hide-m">Envoyé le</th><th class="num">Montant HT</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">Aucun devis.</td></tr>`}</tbody></table></div></div>`;
   }
   return `
-  <div class="top"><div><h1>Clients</h1><div class="sub">${S.clients.length} clients · ${S.contrats.filter(c => c.statut === "actif").length} contrats actifs</div></div>${btn}</div>
-  <div class="toolbar"><div class="seg">${[["clients", "Clients"], ["contrats", "Contrats"], ["devis", "Devis"]].map(([k, l]) => `<button class="${tab === k ? "on" : ""}" data-act="clientsTab" data-v="${k}">${l}</button>`).join("")}</div>
+  <div class="top"><div class="titles"><h1>Clients</h1><div class="sub">${S.clients.length} clients, ${S.contrats.filter(c => c.statut === "actif").length} contrats actifs</div></div>${btn}</div>
+  <div class="toolbar"><div class="seg"><span class="thumb"></span>${[["clients", "Clients"], ["contrats", "Contrats"], ["devis", "Devis"]].map(([k, l]) => `<button class="${tab === k ? "on" : ""}" data-act="clientsTab" data-v="${k}">${l}</button>`).join("")}</div>
   <input class="search" placeholder="Rechercher" value="${esc(UI.search)}" data-on="search"></div>
   ${body}`;
 };
@@ -398,17 +436,17 @@ views.factures = () => {
   const year = today().slice(0, 4);
   const rows = list.map(f => `<tr class="click" data-act="open" data-t="factures" data-id="${f.id}"><td><b>${esc(client(f.client_id).nom)}</b><div class="sub">${esc(f.numero || "")}${f.nb_relances ? ` · ${f.nb_relances} relance${f.nb_relances > 1 ? "s" : ""}, dernière le ${fdateShort(f.derniere_relance)}` : ""}</div></td><td class="hide-m">${fdate(f.date_emission)}</td><td class="hide-m">${fdate(f.echeance)}</td><td class="num">${eur2(f.montant_ht)}</td><td>${isLate(f) ? `<span class="pill danger">Retard ${lateDays(f)} j</span>` : pill(ST_FACT, f.statut)}</td></tr>`).join("");
   return `
-  <div class="top"><div><h1>Facturation</h1><div class="sub">Suivi des factures émises dans Qonto, encaissements et relances</div></div>
+  <div class="top"><div class="titles"><h1>Facturation</h1><div class="sub">Suivi des factures émises dans Qonto, encaissements et relances</div></div>
     <button class="btn primary" data-act="new" data-t="factures">${icon("plus")}Facture</button></div>
   <div class="grid kpis">
-    <div class="card kpi"><div class="label">À encaisser</div><div class="value">${eur(sum(attente, f => f.montant_ht))}</div><div class="hint">${attente.length} facture${attente.length > 1 ? "s" : ""}</div></div>
+    <div class="card kpi anim"><div class="label">À encaisser</div><div class="value">${eur(sum(attente, f => f.montant_ht))}</div><div class="hint">${attente.length} facture${attente.length > 1 ? "s" : ""}</div></div>
     <div class="card kpi ${late.length ? "alert" : "good"}"><div class="label">En retard</div><div class="value">${eur(sum(late, f => f.montant_ht))}</div><div class="hint">${late.length} facture${late.length > 1 ? "s" : ""}</div></div>
-    <div class="card kpi"><div class="label">À facturer</div><div class="value">${eur(sum(aFact, i => i.montant))}</div><div class="hint">${aFact.length} intervention${aFact.length > 1 ? "s" : ""} réalisée${aFact.length > 1 ? "s" : ""}</div></div>
-    <div class="card kpi"><div class="label">Encaissé ${year}</div><div class="value">${eur(sum(S.factures.filter(f => f.statut === "payee" && (f.date_paiement || "").startsWith(year)), f => f.montant_ht))}</div><div class="hint">factures payées</div></div>
+    <div class="card kpi anim"><div class="label">À facturer</div><div class="value">${eur(sum(aFact, i => i.montant))}</div><div class="hint">${aFact.length} intervention${aFact.length > 1 ? "s" : ""} réalisée${aFact.length > 1 ? "s" : ""}</div></div>
+    <div class="card kpi anim"><div class="label">Encaissé ${year}</div><div class="value">${eur(sum(S.factures.filter(f => f.statut === "payee" && (f.date_paiement || "").startsWith(year)), f => f.montant_ht))}</div><div class="hint">factures payées</div></div>
   </div>
-  ${aFact.length ? `<div class="card section" id="afacturer"><div class="head"><h2>Interventions à facturer</h2></div><div class="rows">${aFact.map(i => `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}"><div class="date"><b>${parse(i.date).getDate()}</b><span>${MOIS[parse(i.date).getMonth()].replace(".", "")}</span></div><div class="main"><div class="t">${esc(client(i.client_id).nom)}</div><div class="s">${esc(i.prestation || "")}${i.notes ? " · " + esc(i.notes) : ""}</div></div><span class="amt">${eur2(i.montant)}</span><button class="btn small primary" data-act="facturer" data-id="${i.id}">Créer la facture</button></div>`).join("")}</div></div>` : ""}
-  <div class="toolbar section"><div class="seg">${[["attente", "À encaisser"], ["retard", "En retard"], ["payees", "Payées"], ["toutes", "Toutes"]].map(([k, l]) => `<button class="${tab === k ? "on" : ""}" data-act="factTab" data-v="${k}">${l}</button>`).join("")}</div></div>
-  <div class="card"><div class="tablewrap"><table><thead><tr><th>Facture</th><th class="hide-m">Émise le</th><th class="hide-m">Échéance</th><th class="num">Montant HT</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="empty">Aucune facture dans cette liste.</td></tr>`}</tbody></table></div></div>`;
+  ${aFact.length ? `<div class="card section anim" id="afacturer"><div class="head"><h2>Interventions à facturer</h2></div><div class="rows">${aFact.map(i => `<div class="row" data-act="open" data-t="interventions" data-id="${i.id}"><div class="date"><b>${parse(i.date).getDate()}</b><span>${MOIS[parse(i.date).getMonth()].replace(".", "")}</span></div><div class="main"><div class="t">${esc(client(i.client_id).nom)}</div><div class="s">${esc(i.prestation || "")}${i.notes ? " · " + esc(i.notes) : ""}</div></div><span class="amt">${eur2(i.montant)}</span><button class="btn small primary" data-act="facturer" data-id="${i.id}">Créer la facture</button></div>`).join("")}</div></div>` : ""}
+  <div class="toolbar section"><div class="seg"><span class="thumb"></span>${[["attente", "À encaisser"], ["retard", "En retard"], ["payees", "Payées"], ["toutes", "Toutes"]].map(([k, l]) => `<button class="${tab === k ? "on" : ""}" data-act="factTab" data-v="${k}">${l}</button>`).join("")}</div></div>
+  <div class="card anim"><div class="tablewrap"><table><thead><tr><th>Facture</th><th class="hide-m">Émise le</th><th class="hide-m">Échéance</th><th class="num">Montant HT</th><th>Statut</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="empty">Aucune facture dans cette liste.</td></tr>`}</tbody></table></div></div>`;
 };
 
 views.equipe = () => {
@@ -417,11 +455,11 @@ views.equipe = () => {
   const membres = S.membres.slice().sort(by(m => m.nom));
   const techs = S.techniciens.slice().sort(by(x => (x.actif === false ? "1" : "0") + x.nom));
   return `
-  <div class="top"><div><h1>Équipe</h1><div class="sub">Rôles de la structure et réseau d'intervenants</div></div>
+  <div class="top"><div class="titles"><h1>Équipe</h1><div class="sub">Rôles de la structure et réseau d'intervenants</div></div>
     <button class="btn" data-act="new" data-t="membres">${icon("plus")}Membre</button>
     <button class="btn primary" data-act="new" data-t="techniciens">${icon("plus")}Intervenant</button></div>
-  <div class="grid kpis">${membres.map(m => `<div class="card" style="cursor:pointer" data-act="open" data-t="membres" data-id="${m.id}"><h3>${esc(m.nom)}</h3><div class="pill accent" style="margin:6px 0 8px">${esc(m.role || "")}</div><div class="sub">${esc(m.missions || "")}</div>${m.email ? `<div class="sub" style="margin-top:6px">${esc(m.email)}</div>` : ""}<div class="sub" style="margin-top:6px">${charge(m.nom)} intervention(s) sur 30 jours</div></div>`).join("") || `<div class="card empty">Aucun membre.</div>`}</div>
-  <div class="card section"><div class="head"><h2>Intervenants terrain</h2><span class="pill">${techs.filter(x => x.actif !== false).length} actifs</span></div>
+  <div class="grid kpis">${membres.map(m => `<div class="card kpi anim click" data-act="open" data-t="membres" data-id="${m.id}"><h3>${esc(m.nom)}</h3><div class="pill info" style="margin:8px 0 10px">${esc(m.role || "")}</div><div class="sub">${esc(m.missions || "")}</div>${m.email ? `<div class="sub" style="margin-top:6px">${esc(m.email)}</div>` : ""}<div class="sub" style="margin-top:6px">${charge(m.nom)} intervention(s) sur 30 jours</div></div>`).join("") || `<div class="card empty">Aucun membre.</div>`}</div>
+  <div class="card section anim"><div class="head"><h2>Intervenants terrain</h2><span class="pill">${techs.filter(x => x.actif !== false).length} actifs</span></div>
     <div class="tablewrap"><table><thead><tr><th>Nom</th><th>Téléphone</th><th class="hide-m">Secteur</th><th>Fiabilité</th><th class="hide-m">Compétences</th><th class="num">30 j</th></tr></thead><tbody>
     ${techs.map(x => `<tr class="click" data-act="open" data-t="techniciens" data-id="${x.id}" style="${x.actif === false ? "opacity:.5" : ""}"><td><b>${esc(x.nom)}</b></td><td>${x.tel ? `<a href="tel:${esc(x.tel.replace(/\s/g, ""))}" onclick="event.stopPropagation()">${esc(x.tel)}</a>` : ""}</td><td class="hide-m">${esc(x.secteur || "")}</td><td style="min-width:90px">${x.fiabilite != null ? `<div class="sub">${x.fiabilite} %</div><div class="progress" style="margin:2px 0 0"><i style="width:${num(x.fiabilite)}%;background:${num(x.fiabilite) >= 70 ? "var(--ok)" : num(x.fiabilite) >= 50 ? "var(--warn)" : "var(--danger)"}"></i></div>` : ""}</td><td class="hide-m sub" style="white-space:normal">${esc(x.competences || "")}</td><td class="num">${charge(x.nom)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Aucun intervenant.</td></tr>`}
     </tbody></table></div></div>`;
@@ -430,9 +468,9 @@ views.equipe = () => {
 views.reglages = () => {
   const P = params();
   return `
-  <div class="top"><div><h1>Réglages</h1><div class="sub">${REMOTE ? `Connecté en tant que ${esc(user?.email || "")} · données partagées Supabase` : "Mode local, données dans ce navigateur"}</div></div></div>
+  <div class="top"><div class="titles"><h1>Réglages</h1><div class="sub">${REMOTE ? `Connecté en tant que ${esc(user?.email || "")} · données partagées Supabase` : "Mode local, données dans ce navigateur"}</div></div></div>
   <div class="grid two">
-    <div class="card"><h2>Paramètres de pilotage</h2>
+    <div class="card anim"><h2>Paramètres de pilotage</h2>
       <form class="form" data-form="params">
         ${field({ k: "urssaf", l: "Taux de cotisations (ex. 0,26)", t: "number", step: "0.01" }, P)}
         ${field({ k: "cible_marque", l: "Cible de taux de marque (ex. 0,5)", t: "number", step: "0.01" }, P)}
@@ -444,7 +482,7 @@ views.reglages = () => {
         <div class="full actions"><button class="btn primary" type="submit">Enregistrer</button></div>
       </form>
     </div>
-    <div class="card"><h2>Données</h2>
+    <div class="card anim"><h2>Données</h2>
       <p class="sub">Export complet en JSON pour sauvegarde. L'import ajoute ou met à jour les lignes du fichier sans rien supprimer.</p>
       <div class="actions"><button class="btn" data-act="export">Exporter (JSON)</button><label class="btn">Importer (JSON)<input type="file" accept="application/json" data-on="import" hidden></label></div>
       ${REMOTE ? `<h2 style="margin-top:22px">Mon compte</h2>
@@ -456,13 +494,14 @@ views.reglages = () => {
 
 /* ---------- Connexion ---------- */
 function loginView() {
-  return `<div class="login"><form class="card" data-form="login">
-    <img src="icon.svg" alt=""><h1>ETHEREA Board</h1><div class="sub">Espace de l'équipe ETHEREA Services</div>
+  return `<div class="login"><div><form class="card anim" data-form="login">
+    <div class="brandline"><img src="assets/emblem.svg" alt=""><div><b>ETHEREA</b><small>Services</small></div></div>
+    <h1>Espace équipe</h1><div class="sub">Pilotage, planning et facturation d'ETHEREA Services.</div>
     <div class="field"><label>Email</label><input type="email" name="email" autocomplete="email" required></div>
     <div class="field"><label>Mot de passe</label><input type="password" name="pw" autocomplete="current-password"></div>
     <button class="btn primary" type="submit">Se connecter</button>
     <button class="btn ghost" type="button" data-act="magic">Recevoir un lien de connexion par email</button>
-    <div class="err" id="loginErr"></div></form></div>`;
+    <div class="err" id="loginErr" role="alert"></div></form><p class="tag">La qualité au service d'un environnement sain</p></div></div>`;
 }
 
 /* ---------- Formulaires ---------- */
@@ -540,9 +579,17 @@ function readForm(form, specs) {
 
 /* ---------- Tiroir (détail / édition) ---------- */
 let drawerState = null;
-function openDrawer(state) { drawerState = state; reopenDrawer(); }
-function closeDrawer() { drawerState = null; const d = $("#drawer"); if (d) d.innerHTML = ""; }
-function reopenDrawer() {
+function openDrawer(state) { const fresh = !drawerState || !$("#drawer .drawer"); drawerState = state; reopenDrawer(fresh ? "open" : "swap"); }
+function closeDrawer() {
+  drawerState = null;
+  const d = $("#drawer"); if (!d || !d.innerHTML) return;
+  const dr = d.querySelector(".drawer"), ov = d.querySelector(".overlay");
+  if (!MOTION || !dr) { d.innerHTML = ""; return; }
+  // Sortie plus douce que l'entrée : courte, petit déplacement
+  MOTION.animate(dr, { x: [0, 32], opacity: [1, 0] }, { duration: 0.16, ease: "easeIn" });
+  MOTION.animate(ov, { opacity: [1, 0] }, { duration: 0.18 }).then(() => { if (!drawerState) d.innerHTML = ""; });
+}
+function reopenDrawer(mode) {
   const d = $("#drawer"); if (!d || !drawerState) return;
   const st = drawerState;
   let html = "";
@@ -550,13 +597,22 @@ function reopenDrawer() {
   else html = detailDrawer(st);
   if (!html) { closeDrawer(); return; }
   const scroll = d.querySelector(".drawer")?.scrollTop || 0;
-  d.innerHTML = `<div class="overlay" data-act="closeOverlay"><div class="drawer" role="dialog" aria-modal="true">${html}</div></div>`;
-  d.querySelector(".drawer").scrollTop = scroll;
+  d.innerHTML = `<div class="overlay" data-act="closeOverlay"><div class="drawer" role="dialog" aria-modal="true">${html}</div></div></div>`;
+  const dr = d.querySelector(".drawer");
+  dr.scrollTop = mode ? 0 : scroll;
+  if (MOTION && mode === "open") {
+    MOTION.animate(d.querySelector(".overlay"), { opacity: [0, 1] }, { duration: 0.2 });
+    MOTION.animate(dr, { x: [48, 0], opacity: [0.4, 1] }, { type: "spring", bounce: 0, duration: 0.35 });
+    MOTION.animate(dr.querySelectorAll(".body > *"), { opacity: [0, 1], y: [10, 0] }, { duration: 0.3, delay: MOTION.stagger(0.04, { startDelay: 0.08 }), ease: EASE });
+  } else if (MOTION && mode === "swap") {
+    MOTION.animate(dr.querySelectorAll(".dh > *, .body > *"), { opacity: [0, 1], y: [8, 0] }, { duration: 0.25, delay: MOTION.stagger(0.03), ease: EASE });
+  }
+  if (mode === "open") setTimeout(() => dr.querySelector("form input:not([type=checkbox]),form select,form textarea")?.focus({ preventScroll: true }), 60);
 }
 function formDrawer(st) {
   const row = st.row;
   const fem = ["interventions", "factures"].includes(st.table);
-  return `<div class="dh"><h2>${S[st.table].some(r => r.id === row.id) ? "Modifier" : fem ? "Nouvelle" : "Nouveau"} ${TITLES[st.table]}</h2><button class="btn ghost small" data-act="close">${icon("x")}</button></div>
+  return `<div class="dh"><div style="margin-right:auto"><h2>${S[st.table].some(r => r.id === row.id) ? "Modifier" : fem ? "Nouvelle" : "Nouveau"} ${TITLES[st.table]}</h2></div><button class="btn outline-w small icon" data-act="close" aria-label="Fermer">${icon("x")}</button></div><div class="body">
   <form class="form" data-form="edit">${FIELDS[st.table].map(f => field(f, row)).join("")}
     <div class="full actions"><button class="btn primary" type="submit">Enregistrer</button><button class="btn" type="button" data-act="close">Annuler</button><span class="grow"></span>${S[st.table].some(r => r.id === row.id) ? `<button class="btn danger" type="button" data-act="del">Supprimer</button>` : ""}</div>
   </form>`;
@@ -567,7 +623,7 @@ const mailLinks = s => (s || "").split(/[;,]/).map(x => x.trim()).filter(Boolean
 function detailDrawer(st) {
   const r = S[st.table].find(x => x.id === st.id);
   if (!r) return "";
-  const head = (title, sub) => `<div class="dh"><div style="margin-right:auto"><h2>${esc(title)}</h2>${sub ? `<div class="sub">${sub}</div>` : ""}</div><button class="btn small" data-act="edit">Modifier</button><button class="btn ghost small" data-act="close">${icon("x")}</button></div>`;
+  const head = (title, sub) => `<div class="dh"><div style="margin-right:auto"><h2>${esc(title)}</h2>${sub ? `<div class="sub">${sub}</div>` : ""}</div><button class="btn onnavy small" data-act="edit">Modifier</button><button class="btn outline-w small icon" data-act="close" aria-label="Fermer">${icon("x")}</button></div><div class="body">`;
   if (st.table === "clients") {
     const ks = S.contrats.filter(k => k.client_id === r.id);
     const its = S.interventions.filter(i => i.client_id === r.id).sort(by(i => i.date || "")).reverse();
@@ -716,8 +772,8 @@ const actions = {
   async relancer(el) {
     const f = S.factures.find(x => x.id === el.dataset.id);
     const c = client(f.client_id);
-    const me = S.membres.find(m => m.email && user?.email && m.email.toLowerCase() === user.email.toLowerCase());
-    const sign = me ? me.nom.split(" ")[0] : "L'équipe ETHEREA";
+    const moi = me();
+    const sign = moi ? moi.nom.split(" ")[0] : "L'équipe ETHEREA";
     const subject = `Facture ${f.numero || ""} ETHEREA Services`;
     const body = `Bonjour,\n\nJ'espère que vous allez bien.\n\nSauf erreur de notre part, la facture ${f.numero || ""} du ${fdate(f.date_emission)}, d'un montant de ${eur2(f.montant_ht)} HT, n'a pas encore été réglée. Pourriez-vous nous indiquer la date de règlement prévue ?\n\nSi le paiement a déjà été effectué, merci de ne pas tenir compte de ce message.\n\nBonne journée,\n\n${sign}\nETHEREA Services\n07 44 84 42 93`;
     const to = (c.email || "").split(/[;,]/).map(x => x.trim()).filter(Boolean).join(",");
@@ -742,6 +798,7 @@ const actions = {
     for (const [k, dates] of plan) for (const d of dates) await store.upsert("interventions", { id: uuid(), date: d, client_id: k.client_id, contrat_id: k.id, metier: k.metier, prestation: k.prestation, technicien: k.technicien, statut: "planifiee", montant: k.prix_passage });
     render(); toast(`${n} passage(s) planifié(s)`);
   },
+  goDay(el) { UI.view = "planning"; UI.planningSpecial = ""; UI.planningMode = "calendrier"; UI.calMonth = el.dataset.v.slice(0, 7); history.replaceState(null, "", "#planning"); closeDrawer(); render(); window.scrollTo(0, 0); },
   planMode(el) { UI.planningMode = el.dataset.v; render(); },
   planSpecial(el) { UI.planningSpecial = el.dataset.v; render(); },
   calNav(el) { UI.calMonth = addMonths(UI.calMonth + "-01", +el.dataset.v).slice(0, 7); render(); },
@@ -833,8 +890,58 @@ document.addEventListener("keydown", ev => { if (ev.key === "Escape" && drawerSt
 window.addEventListener("hashchange", () => { const v = location.hash.slice(1).split(":")[0]; if (v && v !== UI.view) { UI.view = v; render(); } });
 
 function toast(msg) {
-  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.appendChild(t);
-  setTimeout(() => t.remove(), 3200);
+  document.querySelectorAll(".toast").forEach(x => x.remove());
+  const t = document.createElement("div"); t.className = "toast"; t.setAttribute("role", "status"); t.textContent = msg; document.body.appendChild(t);
+  if (MOTION) MOTION.animate(t, { opacity: [0, 1], y: [12, 0] }, { duration: 0.25, ease: EASE });
+  setTimeout(() => {
+    if (!MOTION) { t.remove(); return; }
+    MOTION.animate(t, { opacity: 0, y: -8 }, { duration: 0.15 }).then(() => t.remove());
+  }, 3400);
+}
+
+/* ---------- Mouvement (Motion, l'équivalent JavaScript de Framer Motion) ---------- */
+let lastAnimKey = null;
+const segPos = {};
+function placeThumbs() {
+  document.querySelectorAll(".seg").forEach((seg, i) => {
+    const th = seg.querySelector(".thumb"), on = seg.querySelector("button.on");
+    if (!th || !on) return;
+    const key = UI.view + i, next = { left: on.offsetLeft, width: on.offsetWidth }, prev = segPos[key];
+    if (prev && (prev.left !== next.left || prev.width !== next.width) && MOTION) {
+      th.style.transition = "none"; th.style.left = prev.left + "px"; th.style.width = prev.width + "px";
+      th.getBoundingClientRect();
+      th.style.transition = ""; th.style.left = next.left + "px"; th.style.width = next.width + "px";
+    } else { th.style.left = next.left + "px"; th.style.width = next.width + "px"; }
+    segPos[key] = next;
+  });
+}
+function afterRender() {
+  placeThumbs();
+  const key = [UI.view, UI.clientsTab, UI.facturesTab, UI.planningMode, UI.planningSpecial, UI.calMonth].join("|");
+  if (!MOTION || key === lastAnimKey) { lastAnimKey = key; return; }
+  const firstEntry = lastAnimKey === null || lastAnimKey.split("|")[0] !== UI.view;
+  lastAnimKey = key;
+  const items = [...document.querySelectorAll("main .anim, .login .anim")];
+  // Entrée découpée : chaque bloc arrive à son tour (opacité, 12 px, flou léger), sans rebond
+  MOTION.animate(items, { opacity: [0, 1], y: [12, 0], filter: ["blur(4px)", "blur(0px)"] }, { duration: 0.35, delay: MOTION.stagger(0.06, { startDelay: 0 }), ease: EASE });
+  if (!firstEntry) return;
+  // Le moment fort du Pilotage : la vague se trace, puis les jours se posent dessus
+  const wave = document.querySelector(".hero .wave path");
+  if (wave) {
+    wave.style.strokeDasharray = "1";
+    MOTION.animate(wave, { strokeDashoffset: [1, 0] }, { duration: 1.1, delay: 0.15, ease: EASE });
+    MOTION.animate(".hero .day .dot", { opacity: [0, 1], scale: [0.6, 1] }, { duration: 0.35, delay: MOTION.stagger(0.07, { startDelay: 0.3 }), ease: EASE });
+    MOTION.animate(".hero .day .dc", { opacity: [0, 1] }, { duration: 0.3, delay: MOTION.stagger(0.07, { startDelay: 0.5 }) });
+  }
+  document.querySelectorAll("main [data-count]").forEach(el => {
+    const target = Number(el.dataset.count) || 0;
+    if (!target) return;
+    MOTION.animate(0, target, { duration: 0.9, delay: 0.15, ease: EASE, onUpdate: v => { el.textContent = el.dataset.fmt === "eur" ? eur(v) : Math.round(v); } });
+  });
+  const bars = document.querySelectorAll("main .bars .b i");
+  if (bars.length) MOTION.animate(bars, { scaleY: [0, 1] }, { duration: 0.5, delay: MOTION.stagger(0.035, { startDelay: 0.25 }), ease: EASE });
+  const prog = document.querySelectorAll("main .progress i");
+  if (prog.length) MOTION.animate(prog, { scaleX: [0, 1] }, { duration: 0.6, delay: 0.3, ease: EASE });
 }
 
 /* ---------- Démarrage ---------- */
