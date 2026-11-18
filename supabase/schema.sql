@@ -110,6 +110,11 @@ create table if not exists parametres (
   updated_at timestamptz default now()
 );
 
+-- Droits de table : indispensables sur les projets récents, sinon "permission denied".
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on clients, contrats, factures, interventions, devis, techniciens, membres, parametres to authenticated;
+revoke all on clients, contrats, factures, interventions, devis, techniciens, membres, parametres from anon;
+
 -- Sécurité : accès complet pour l'équipe connectée, aucun accès anonyme.
 do $$
 declare t text;
