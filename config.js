@@ -5,5 +5,5 @@
 // Laisser vide pour utiliser l'app en mode local (données dans ce navigateur uniquement).
 window.ETHEREA_CONFIG = {
   supabaseUrl: "https://irfemouegnpowseqavfd.supabase.co",
-  supabaseAnonKey: ""
+  supabaseAnonKey: "sb_publishable_fUaiZNNF97QXe7xYRQ4gsQ_cMbauUkV"
 };
